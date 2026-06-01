@@ -1,5 +1,6 @@
 .env
 /models/
+/data/
 *.joblib
 __pycache__/
 *.pyc
