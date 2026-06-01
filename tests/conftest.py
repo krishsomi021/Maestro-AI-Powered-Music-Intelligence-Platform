@@ -3,11 +3,12 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.config import settings
 from app.db.async_session import get_db
 from app.main import app
 from app.models.job import Base
 
-TEST_DATABASE_URL = "postgresql+asyncpg://jobsuser:jobspassword@postgres:5432/jobsdb"
+TEST_DATABASE_URL = settings.async_database_url
 
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
 TestSessionLocal = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
