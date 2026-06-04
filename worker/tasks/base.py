@@ -42,6 +42,7 @@ class BaseJobTask(Task):
             job = db.get(Job, uuid.UUID(job_id))
             if job and job.status != "cancelled":
                 job.status = "failed"
+                job.retry_count = self.max_retries
                 job.error = str(exc)
                 if not job.completed_at:
                     job.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)

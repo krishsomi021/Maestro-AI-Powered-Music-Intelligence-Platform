@@ -122,6 +122,7 @@ def test_base_on_failure_sets_failed_status():
         task.on_failure(exc=RuntimeError("fatal"), task_id=job_id, args=[job_id], kwargs={}, einfo=None)
 
     assert mock_job.status == "failed"
+    assert mock_job.retry_count == task.max_retries
     assert mock_job.error == "fatal"
     mock_db.close.assert_called_once()
 
