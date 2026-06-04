@@ -11,6 +11,7 @@ celery_app = Celery(
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
     include=[
+        "worker.tasks.base",
         "worker.tasks.ml_inference",
         "worker.tasks.etl_pipeline",
         "worker.tasks.report_generation",
@@ -24,4 +25,5 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    task_default_queue="celery",
 )

@@ -10,5 +10,7 @@ class JobType(StrEnum):
 class JobStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+    RETRYING = "retrying"
     COMPLETE = "complete"
     FAILED = "failed"
+    CANCELLED = "cancelled"
