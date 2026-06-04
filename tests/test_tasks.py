@@ -1,5 +1,5 @@
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -84,21 +84,18 @@ def test_etl_cancelled_job_skips_completion(mock_sleep, mock_get_db):
     mock_db.close.assert_called_once()
 
 
-@patch("worker.db.sync_session.get_sync_db")
-def test_base_on_retry_sets_retrying_status(mock_get_db):
+def test_base_on_retry_sets_retrying_status():
     job_id = str(uuid.uuid4())
     mock_job = _make_job(job_id, {})
     mock_db = MagicMock()
     mock_db.get.return_value = mock_job
-    mock_get_db.return_value = mock_db
 
     from worker.tasks.base import BaseJobTask
 
     task = BaseJobTask()
-    task.request = MagicMock()
-    task.request.retries = 1
-
-    with patch("worker.db.sync_session.get_sync_db", return_value=mock_db):
+    mock_request = MagicMock(retries=1)
+    with patch.object(type(task), "request", new_callable=PropertyMock, return_value=mock_request), \
+         patch("worker.db.sync_session.get_sync_db", return_value=mock_db):
         task.on_retry(exc=RuntimeError("boom"), task_id=job_id, args=[job_id], kwargs={}, einfo=None)
 
     assert mock_job.status == "retrying"

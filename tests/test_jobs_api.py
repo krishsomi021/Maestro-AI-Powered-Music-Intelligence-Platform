@@ -88,7 +88,7 @@ async def test_cancel_pending_job(client):
     submit = await client.post("/jobs", json={"job_type": "etl_pipeline", "payload": {"source": "a", "destination": "b"}})
     job_id = submit.json()["job_id"]
 
-    with patch("app.api.services.job_service.celery_app") as mock_celery:
+    with patch("worker.celery_app.celery_app") as mock_celery:
         resp = await client.delete(f"/jobs/{job_id}")
 
     assert resp.status_code == 200
@@ -99,7 +99,7 @@ async def test_cancel_pending_job(client):
 
 @pytest.mark.asyncio
 async def test_cancel_nonexistent_job(client):
-    with patch("app.api.services.job_service.celery_app"):
+    with patch("worker.celery_app.celery_app"):
         resp = await client.delete(f"/jobs/{uuid.uuid4()}")
     assert resp.status_code == 404
 
@@ -109,7 +109,7 @@ async def test_cancel_already_cancelled_job_returns_409(client):
     submit = await client.post("/jobs", json={"job_type": "etl_pipeline", "payload": {"source": "a", "destination": "b"}})
     job_id = submit.json()["job_id"]
 
-    with patch("app.api.services.job_service.celery_app"):
+    with patch("worker.celery_app.celery_app"):
         await client.delete(f"/jobs/{job_id}")
         resp = await client.delete(f"/jobs/{job_id}")
 
