@@ -1,13 +1,12 @@
 import logging
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dao import job_dao
 from app.api.services import job_service
-from app.core.enums import JobStatus, JobType
+from app.core.enums import JobStatus
 from app.db.async_session import get_db
 from app.models.job import Job
 from app.schemas.job import (
@@ -47,44 +46,19 @@ async def list_dead_letter_jobs(limit: int = 20, db: AsyncSession = Depends(get_
 
 
 @router.post("", response_model=JobCreateResponse)
-async def submit_job(
+async def submit_job_route(
     body: JobSubmitRequest,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    if body.idempotency_key:
-        existing = await job_service.find_by_idempotency_key(db, body.idempotency_key)
-        if existing:
-            response.status_code = status.HTTP_200_OK
-            return JobCreateResponse(
-                job_id=existing.id,
-                status=existing.status,
-                created_at=existing.created_at,
-            )
-
-    job = Job(
-        id=uuid.uuid4(),
-        job_type=body.job_type,
-        status=JobStatus.PENDING,
-        payload=body.payload,
-        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
-        idempotency_key=body.idempotency_key,
-    )
-    db.add(job)
-    await db.commit()
-    await db.refresh(job)
-
-    _enqueue_task(body.job_type, str(job.id))
-
-    response.status_code = status.HTTP_202_ACCEPTED
-    logger.info("job %s submitted type=%s", job.id, job.job_type)
+    job, is_new = await job_service.submit_job(db, body.job_type, body.payload, body.idempotency_key)
+    response.status_code = status.HTTP_202_ACCEPTED if is_new else status.HTTP_200_OK
     return JobCreateResponse(job_id=job.id, status=job.status, created_at=job.created_at)
 
 
 @router.get("/{job_id}", response_model=JobResponse)
 async def get_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Job).where(Job.id == job_id))
-    job = result.scalar_one_or_none()
+    job = await job_dao.get_by_id(db, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return _to_response(job)
@@ -92,10 +66,7 @@ async def get_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 @router.get("", response_model=JobListResponse)
 async def list_jobs(limit: int = 20, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Job).order_by(Job.created_at.desc()).limit(limit)
-    )
-    jobs = result.scalars().all()
+    jobs = await job_dao.list_jobs(db, limit)
     return JobListResponse(jobs=[_to_response(j) for j in jobs], total=len(jobs))
 
 
@@ -110,14 +81,3 @@ async def cancel_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
             detail=f"Cannot cancel job with status '{result['status']}'",
         )
     return CancelJobResponse(job_id=job_id, status=JobStatus.CANCELLED)
-
-
-def _enqueue_task(job_type: JobType, job_id: str) -> None:
-    from worker.celery_app import celery_app
-
-    task_map = {
-        JobType.ML_INFERENCE: "worker.tasks.ml_inference.run_ml_inference",
-        JobType.ETL_PIPELINE: "worker.tasks.etl_pipeline.run_etl_pipeline",
-        JobType.REPORT_GENERATION: "worker.tasks.report_generation.run_report_generation",
-    }
-    celery_app.send_task(task_map[job_type], args=[job_id], task_id=job_id)

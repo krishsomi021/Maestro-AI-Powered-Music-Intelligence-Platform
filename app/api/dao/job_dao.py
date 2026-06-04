@@ -4,7 +4,28 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.enums import JobStatus, JobType
 from app.models.job import Job
+
+
+async def create_job(
+    db: AsyncSession,
+    job_type: JobType,
+    payload: dict,
+    idempotency_key: str | None = None,
+) -> Job:
+    job = Job(
+        id=uuid.uuid4(),
+        job_type=job_type,
+        status=JobStatus.PENDING,
+        payload=payload,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        idempotency_key=idempotency_key,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    return job
 
 
 async def get_by_id(db: AsyncSession, job_id: uuid.UUID) -> Job | None:
@@ -24,6 +45,13 @@ async def get_dead_letter_jobs(db: AsyncSession, limit: int = 20) -> list[Job]:
         .where(Job.retry_count >= Job.max_retries)
         .order_by(Job.completed_at.desc())
         .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def list_jobs(db: AsyncSession, limit: int = 20) -> list[Job]:
+    result = await db.execute(
+        select(Job).order_by(Job.created_at.desc()).limit(limit)
     )
     return list(result.scalars().all())
 
