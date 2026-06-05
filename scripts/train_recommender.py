@@ -1,162 +1,280 @@
 """
-Train a Spotify recommendation model from personal listening history.
+Train a Spotify co-occurrence recommendation model from personal export data.
 
 Usage:
     python scripts/train_recommender.py ./data/spotify_export
-    python scripts/train_recommender.py ./data/spotify_export --output models/spotify_recommender.joblib --min-plays 2
 
-Detects basic export (StreamingHistory*.json) or extended export
-(Streaming_History_Audio_*.json) automatically.
+Reads:
+    StreamingHistory_music_0.json, StreamingHistory_music_1.json
+    YourLibrary.json
+    Playlist1.json
 
-Produces models/spotify_recommender.joblib containing:
-  - matrix       : cosine-similarity matrix (n_tracks × n_tracks, float32)
-  - track_ids    : list of track_id strings (row/col index)
-  - track_id_to_idx : dict track_id → int index
-  - track_lookup : dict track_id → {"track_name": ..., "artist": ...}
+Produces:
+    models/spotify_recommender.joblib
+
+Model schema:
+    {
+        "similarity"   : dict[track_key, dict[track_key, float]],
+        "uri_to_meta"  : dict[uri, {"track_name": str, "artist_name": str, "uri": str}],
+        "saved_tracks" : set[uri],
+        "trained_at"   : str (ISO-8601),
+        "total_tracks" : int,
+        "total_plays"  : int,
+    }
 """
 
 import argparse
 import glob
-import hashlib
 import json
 import logging
 import sys
+from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import joblib
-import numpy as np
-import pandas as pd
-from sklearn.metrics.pairwise import cosine_similarity
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
+# Gap between consecutive plays that starts a new session
+SESSION_GAP = timedelta(minutes=30)
+# Minimum play duration to count (skip short plays)
+MIN_MS_PLAYED = 30_000
 
-def make_track_id(artist: str, track_name: str) -> str:
-    key = f"{artist.strip().lower()}|||{track_name.strip().lower()}"
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+# ---------------------------------------------------------------------------
+# Track key helpers
+# ---------------------------------------------------------------------------
+
+def _fallback_key(artist: str, track: str) -> str:
+    return f"{artist.strip().lower()}|||{track.strip().lower()}"
 
 
-def load_basic_export(folder: Path) -> pd.DataFrame:
-    files = sorted(glob.glob(str(folder / "StreamingHistory*.json")))
-    rows = []
+# ---------------------------------------------------------------------------
+# Data loaders
+# ---------------------------------------------------------------------------
+
+def _load_streaming_history(folder: Path) -> list[dict]:
+    """Load all StreamingHistory_music_*.json files and return raw records."""
+    files = sorted(glob.glob(str(folder / "StreamingHistory_music_*.json")))
+    records = []
     for f in files:
         with open(f, encoding="utf-8") as fh:
-            rows.extend(json.load(fh))
-    df = pd.DataFrame(rows)
-    df = df.rename(columns={
-        "trackName": "track_name",
-        "artistName": "artist",
-        "msPlayed": "ms_played",
-        "endTime": "timestamp",
-    })
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    return df[["timestamp", "track_name", "artist", "ms_played"]]
+            records.extend(json.load(fh))
+    return records
 
 
-def load_extended_export(folder: Path) -> pd.DataFrame:
-    files = sorted(glob.glob(str(folder / "Streaming_History_Audio_*.json")))
-    rows = []
-    for f in files:
-        with open(f, encoding="utf-8") as fh:
-            rows.extend(json.load(fh))
-    df = pd.DataFrame(rows)
-    df = df.rename(columns={
-        "master_metadata_track_name": "track_name",
-        "master_metadata_album_artist_name": "artist",
-        "ms_played": "ms_played",
-        "ts": "timestamp",
-    })
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.dropna(subset=["track_name", "artist"])
-    return df[["timestamp", "track_name", "artist", "ms_played"]]
+def _load_your_library(folder: Path) -> set:
+    """Return set of saved-track URIs from YourLibrary.json."""
+    path = folder / "YourLibrary.json"
+    if not path.exists():
+        logger.warning("YourLibrary.json not found — skipping saved-track signal")
+        return set()
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    return {t["uri"] for t in data.get("tracks", []) if t.get("uri")}
 
 
-def build_model(df: pd.DataFrame, min_plays: int) -> dict:
-    df = df[df["ms_played"] >= 30_000].copy()
-    logger.info("%d plays after filtering skips (< 30s)", len(df))
+def _load_playlists(folder: Path) -> list[list[str]]:
+    """Return list of playlists; each playlist is a list of trackUris."""
+    path = folder / "Playlist1.json"
+    if not path.exists():
+        logger.warning("Playlist1.json not found — skipping playlist signal")
+        return []
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    result = []
+    for pl in data.get("playlists", []):
+        uris = [
+            item["track"]["trackUri"]
+            for item in pl.get("items", [])
+            if item.get("track") and item["track"].get("trackUri")
+        ]
+        if uris:
+            result.append(uris)
+    return result
 
-    df["track_id"] = df.apply(
-        lambda r: make_track_id(r["artist"], r["track_name"]), axis=1
-    )
 
-    track_lookup = (
-        df[["track_id", "track_name", "artist"]]
-        .drop_duplicates("track_id")
-        .set_index("track_id")[["track_name", "artist"]]
-        .to_dict("index")
-    )
+# ---------------------------------------------------------------------------
+# Session splitting
+# ---------------------------------------------------------------------------
 
-    play_counts = df.groupby("track_id")["ms_played"].count()
-    valid_tracks = play_counts[play_counts >= min_plays].index
-    df = df[df["track_id"].isin(valid_tracks)]
-    logger.info("%d tracks with >= %d plays", len(valid_tracks), min_plays)
+def _split_into_sessions(plays: list[tuple]) -> list[list[str]]:
+    """
+    plays: list of (datetime, track_key) sorted ascending by time.
+    Returns list of sessions; each session is a list of track_keys.
+    Consecutive plays within SESSION_GAP belong to the same session.
+    """
+    if not plays:
+        return []
+    sessions = []
+    current = [plays[0][1]]
+    for i in range(1, len(plays)):
+        gap = plays[i][0] - plays[i - 1][0]
+        if gap <= SESSION_GAP:
+            current.append(plays[i][1])
+        else:
+            sessions.append(current)
+            current = [plays[i][1]]
+    sessions.append(current)
+    return sessions
 
-    if len(valid_tracks) < 2:
-        logger.error(
-            "Not enough tracks to build a model (need at least 2 with >= %d plays). "
-            "Try lowering --min-plays.",
-            min_plays,
-        )
-        sys.exit(1)
 
-    # Track × day matrix: each cell = total ms played for that track on that day.
-    # Cosine similarity between rows captures tracks that are played on the same days.
-    df["date"] = df["timestamp"].dt.date
-    pivot = (
-        df.groupby(["track_id", "date"])["ms_played"]
-        .sum()
-        .unstack(fill_value=0)
-    )
-    track_ids = list(pivot.index)
-    matrix = pivot.values.astype(np.float32)
+# ---------------------------------------------------------------------------
+# Co-occurrence accumulation
+# ---------------------------------------------------------------------------
 
-    logger.info("Computing similarity matrix (%d tracks)...", len(track_ids))
-    sim_matrix = cosine_similarity(matrix).astype(np.float32)
-    np.fill_diagonal(sim_matrix, 0.0)
+def _add_cooccurrence(matrix: dict, a: str, b: str, weight: float = 1.0) -> None:
+    if a == b:
+        return
+    matrix[a][b] = matrix[a].get(b, 0.0) + weight
+    matrix[b][a] = matrix[b].get(a, 0.0) + weight
 
-    track_id_to_idx = {tid: i for i, tid in enumerate(track_ids)}
+
+# ---------------------------------------------------------------------------
+# Core builder
+# ---------------------------------------------------------------------------
+
+def build_model(folder: Path) -> dict:
+    # -----------------------------------------------------------------------
+    # 1. Streaming history
+    # -----------------------------------------------------------------------
+    raw = _load_streaming_history(folder)
+    total_plays_raw = len(raw)
+
+    plays_filtered = []
+    uri_to_meta: dict = {}
+
+    for entry in raw:
+        if entry.get("msPlayed", 0) < MIN_MS_PLAYED:
+            continue
+        artist = entry.get("artistName", "")
+        track = entry.get("trackName", "")
+        key = _fallback_key(artist, track)
+        ts = datetime.strptime(entry["endTime"], "%Y-%m-%d %H:%M")
+        plays_filtered.append((ts, key))
+
+        # Streaming history has no URI — store metadata under the fallback key
+        if key not in uri_to_meta:
+            uri_to_meta[key] = {
+                "track_name": track,
+                "artist_name": artist,
+                "uri": key,
+            }
+
+    skips = total_plays_raw - len(plays_filtered)
+    logger.info("Streaming history: %d total plays, %d filtered as skips (<30 s)", total_plays_raw, skips)
+    logger.info("Plays kept: %d", len(plays_filtered))
+
+    # Sort by timestamp for session splitting
+    plays_filtered.sort(key=lambda x: x[0])
+    sessions = _split_into_sessions(plays_filtered)
+    logger.info("Sessions: %d", len(sessions))
+
+    # Build co-occurrence matrix from sessions
+    cooccurrence: dict = defaultdict(dict)
+    for session in sessions:
+        unique = list(dict.fromkeys(session))  # preserve order, deduplicate within session
+        for i in range(len(unique)):
+            for j in range(i + 1, len(unique)):
+                _add_cooccurrence(cooccurrence, unique[i], unique[j], weight=1.0)
+
+    # -----------------------------------------------------------------------
+    # 2. Saved tracks (YourLibrary.json) — weight multiplier 3.0
+    # -----------------------------------------------------------------------
+    saved_tracks = _load_your_library(folder)
+    logger.info("Saved tracks: %d", len(saved_tracks))
+
+    # Register saved-track URIs in uri_to_meta (YourLibrary has richer metadata)
+    library_path = folder / "YourLibrary.json"
+    if library_path.exists():
+        with open(library_path, encoding="utf-8") as fh:
+            lib_data = json.load(fh)
+        for t in lib_data.get("tracks", []):
+            uri = t.get("uri", "")
+            if uri:
+                uri_to_meta[uri] = {
+                    "track_name": t.get("track", ""),
+                    "artist_name": t.get("artist", ""),
+                    "uri": uri,
+                }
+
+    # -----------------------------------------------------------------------
+    # 3. Playlist co-occurrence (weight multiplier 2.0)
+    # -----------------------------------------------------------------------
+    playlists = _load_playlists(folder)
+    logger.info("Playlists: %d", len(playlists))
+
+    # Register playlist-track URIs in uri_to_meta
+    pl_path = folder / "Playlist1.json"
+    if pl_path.exists():
+        with open(pl_path, encoding="utf-8") as fh:
+            pl_data = json.load(fh)
+        for pl in pl_data.get("playlists", []):
+            for item in pl.get("items", []):
+                t = item.get("track")
+                if not t:
+                    continue
+                uri = t.get("trackUri", "")
+                if uri and uri not in uri_to_meta:
+                    uri_to_meta[uri] = {
+                        "track_name": t.get("trackName", ""),
+                        "artist_name": t.get("artistName", ""),
+                        "uri": uri,
+                    }
+
+    for uris in playlists:
+        unique = list(dict.fromkeys(uris))
+        for i in range(len(unique)):
+            for j in range(i + 1, len(unique)):
+                _add_cooccurrence(cooccurrence, unique[i], unique[j], weight=2.0)
+
+    # -----------------------------------------------------------------------
+    # 4. Apply saved-track multiplier (3.0) to outbound scores
+    # -----------------------------------------------------------------------
+    for source in list(cooccurrence.keys()):
+        if source in saved_tracks:
+            cooccurrence[source] = {
+                tgt: score * 3.0
+                for tgt, score in cooccurrence[source].items()
+            }
+
+    # -----------------------------------------------------------------------
+    # 5. Normalize: each source row divided by its total outbound score sum
+    # -----------------------------------------------------------------------
+    similarity: dict = {}
+    for source, neighbours in cooccurrence.items():
+        total = sum(neighbours.values())
+        if total > 0:
+            similarity[source] = {
+                tgt: round(score / total, 6)
+                for tgt, score in neighbours.items()
+            }
+
+    total_tracks = len(similarity)
+    total_plays = len(plays_filtered)
 
     return {
-        "matrix": sim_matrix,
-        "track_ids": track_ids,
-        "track_id_to_idx": track_id_to_idx,
-        "track_lookup": track_lookup,
+        "similarity": similarity,
+        "uri_to_meta": uri_to_meta,
+        "saved_tracks": saved_tracks,
+        "trained_at": datetime.utcnow().isoformat(),
+        "total_tracks": total_tracks,
+        "total_plays": total_plays,
+        # internal stats used only by the training summary; not needed at inference
+        "_total_plays_raw": total_plays_raw,
+        "_skips": skips,
+        "_num_playlists": len(playlists),
     }
 
 
-def print_sample(artifact: dict) -> None:
-    track_ids = artifact["track_ids"]
-    matrix = artifact["matrix"]
-    track_lookup = artifact["track_lookup"]
-    track_id_to_idx = artifact["track_id_to_idx"]
-
-    if not track_ids:
-        return
-
-    seed = track_ids[0]
-    info = track_lookup.get(seed, {})
-    logger.info(
-        "Sample seed: '%s — %s'",
-        info.get("artist", "?"),
-        info.get("track_name", "?"),
-    )
-    idx = track_id_to_idx[seed]
-    scores = matrix[idx]
-    top5 = np.argsort(scores)[::-1][:5]
-    for rank, i in enumerate(top5, 1):
-        rec_info = track_lookup.get(track_ids[i], {})
-        logger.info(
-            "  %d. %s — %s  (score=%.4f)",
-            rank,
-            rec_info.get("artist", "?"),
-            rec_info.get("track_name", "?"),
-            scores[i],
-        )
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train Spotify recommendation model")
+    parser = argparse.ArgumentParser(description="Train Spotify co-occurrence recommendation model")
     parser.add_argument(
         "folder",
         nargs="?",
@@ -166,13 +284,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default="models/spotify_recommender.joblib",
-        help="Output path for the joblib artifact",
-    )
-    parser.add_argument(
-        "--min-plays",
-        type=int,
-        default=2,
-        help="Minimum play count to include a track (default: 2)",
+        help="Output path (default: models/spotify_recommender.joblib)",
     )
     args = parser.parse_args()
 
@@ -181,34 +293,29 @@ def main() -> None:
         logger.error("Export folder not found: %s", folder)
         sys.exit(1)
 
-    extended_files = glob.glob(str(folder / "Streaming_History_Audio_*.json"))
-    basic_files = glob.glob(str(folder / "StreamingHistory*.json"))
-
-    if extended_files:
-        logger.info("Detected extended export format (%d file(s))", len(extended_files))
-        df = load_extended_export(folder)
-    elif basic_files:
-        logger.info("Detected basic export format (%d file(s))", len(basic_files))
-        df = load_basic_export(folder)
-    else:
-        logger.error(
-            "No Spotify export files found in %s. "
-            "Expected StreamingHistory*.json or Streaming_History_Audio_*.json.",
-            folder,
-        )
+    streaming_files = glob.glob(str(folder / "StreamingHistory_music_*.json"))
+    if not streaming_files:
+        logger.error("No StreamingHistory_music_*.json files found in %s", folder)
         sys.exit(1)
 
-    logger.info("Loaded %d raw plays", len(df))
-
-    artifact = build_model(df, min_plays=args.min_plays)
+    model = build_model(folder)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(artifact, output_path)
 
-    logger.info("Saved model → %s", output_path)
-    logger.info("Tracks in model: %d", len(artifact["track_ids"]))
-    print_sample(artifact)
+    logger.info("---")
+    logger.info("Total plays parsed:       %d", model["_total_plays_raw"])
+    logger.info("Plays filtered as skips:  %d", model["_skips"])
+    logger.info("Plays kept:               %d", model["total_plays"])
+    logger.info("Unique tracks in model:   %d", model["total_tracks"])
+    logger.info("Playlists processed:      %d", model["_num_playlists"])
+    logger.info("Saved tracks:             %d", len(model["saved_tracks"]))
+    logger.info("Model saved to:           %s", output_path)
+
+    # Strip internal stats before writing — they don't belong in the inference artifact
+    for key in ("_total_plays_raw", "_skips", "_num_playlists"):
+        model.pop(key, None)
+    joblib.dump(model, output_path)
 
 
 if __name__ == "__main__":
