@@ -55,6 +55,11 @@ def _run_recommender(payload: dict) -> dict:
     for seed_uri in seed_tracks:
         neighbours = similarity.get(seed_uri)
         if neighbours is None:
+            meta = uri_to_meta.get(seed_uri, {})
+            if meta:
+                fallback = f"{meta.get('artist_name', '').strip().lower()}|||{meta.get('track_name', '').strip().lower()}"
+                neighbours = similarity.get(fallback)
+        if neighbours is None:
             logger.warning("seed URI not found in model, skipping: %s", seed_uri)
             continue
         found_seeds.append(seed_uri)

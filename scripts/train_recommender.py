@@ -186,19 +186,21 @@ def build_model(folder: Path) -> dict:
     saved_tracks = _load_your_library(folder)
     logger.info("Saved tracks: %d", len(saved_tracks))
 
-    # Register saved-track URIs in uri_to_meta (YourLibrary has richer metadata)
+    # Load full library track list once; reused for uri_to_meta and URI aliases
     library_path = folder / "YourLibrary.json"
+    lib_tracks: list = []
     if library_path.exists():
         with open(library_path, encoding="utf-8") as fh:
-            lib_data = json.load(fh)
-        for t in lib_data.get("tracks", []):
-            uri = t.get("uri", "")
-            if uri:
-                uri_to_meta[uri] = {
-                    "track_name": t.get("track", ""),
-                    "artist_name": t.get("artist", ""),
-                    "uri": uri,
-                }
+            lib_tracks = json.load(fh).get("tracks", [])
+
+    for t in lib_tracks:
+        uri = t.get("uri", "")
+        if uri:
+            uri_to_meta[uri] = {
+                "track_name": t.get("track", ""),
+                "artist_name": t.get("artist", ""),
+                "uri": uri,
+            }
 
     # -----------------------------------------------------------------------
     # 3. Playlist co-occurrence (weight multiplier 2.0)
@@ -251,6 +253,19 @@ def build_model(folder: Path) -> dict:
                 tgt: round(score / total, 6)
                 for tgt, score in neighbours.items()
             }
+
+    # -----------------------------------------------------------------------
+    # 6. URI aliases: library tracks whose co-occurrence was keyed by fallback
+    # -----------------------------------------------------------------------
+    for t in lib_tracks:
+        uri = t.get("uri", "")
+        artist = t.get("artist", "")
+        track_name = t.get("track", "")
+        if not (uri and artist and track_name):
+            continue
+        fallback = _fallback_key(artist, track_name)
+        if fallback in similarity and uri not in similarity:
+            similarity[uri] = similarity[fallback]
 
     total_tracks = len(similarity)
     total_plays = len(plays_filtered)

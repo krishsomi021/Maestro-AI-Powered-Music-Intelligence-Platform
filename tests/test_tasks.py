@@ -90,6 +90,47 @@ def test_spotify_recommender_task(mock_get_db, mock_load_model):
 
 @patch("worker.tasks.ml_inference._load_recommender_model")
 @patch("worker.tasks.ml_inference.get_sync_db")
+def test_spotify_recommender_fallback_key_lookup(mock_get_db, mock_load_model):
+    """When a seed URI is absent from similarity but present in uri_to_meta,
+    the worker should retry with the artist|||track fallback key."""
+    fallback_key = "artist a|||seed song"
+    rec_uri = "spotify:track:rec_x"
+    seed_uri = "spotify:track:seed1"
+
+    mock_model = {
+        "similarity": {
+            fallback_key: {rec_uri: 0.75},
+        },
+        "uri_to_meta": {
+            seed_uri: {"track_name": "Seed Song", "artist_name": "Artist A", "uri": seed_uri},
+            rec_uri: {"track_name": "Rec X", "artist_name": "Artist Z", "uri": rec_uri},
+        },
+        "saved_tracks": set(),
+        "trained_at": "2026-01-01T00:00:00",
+        "total_tracks": 2,
+        "total_plays": 50,
+    }
+    mock_load_model.return_value = mock_model
+
+    job_id = str(uuid.uuid4())
+    mock_job = _make_job(job_id, {"seed_tracks": [seed_uri], "top_n": 5})
+    mock_db = MagicMock()
+    mock_db.get.return_value = mock_job
+    mock_get_db.return_value = mock_db
+
+    from worker.tasks.ml_inference import run_ml_inference
+
+    run_ml_inference(job_id)
+
+    assert mock_job.status == "complete"
+    result = mock_job.result
+    assert result["seed_count"] == 1
+    assert len(result["recommendations"]) == 1
+    assert result["recommendations"][0]["uri"] == rec_uri
+
+
+@patch("worker.tasks.ml_inference._load_recommender_model")
+@patch("worker.tasks.ml_inference.get_sync_db")
 def test_spotify_recommender_unknown_seeds_returns_empty(mock_get_db, mock_load_model):
     """Seeds not found in the model are skipped; zero found seeds -> empty recommendations."""
     mock_load_model.return_value = {
