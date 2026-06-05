@@ -1,4 +1,5 @@
 import logging
+import random
 import uuid
 from datetime import datetime, timezone
 
@@ -7,6 +8,7 @@ import numpy as np
 
 from worker.celery_app import celery_app
 from worker.db.sync_session import get_sync_db
+from worker.tasks.base import BaseJobTask
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +91,8 @@ def _run_recommender(payload: dict) -> dict:
     }
 
 
-@celery_app.task(name="worker.tasks.ml_inference.run_ml_inference")
-def run_ml_inference(job_id: str) -> None:
+@celery_app.task(name="worker.tasks.ml_inference.run_ml_inference", bind=True, base=BaseJobTask)
+def run_ml_inference(self, job_id: str) -> None:
     from app.models.job import Job
 
     db = get_sync_db()
@@ -106,17 +108,19 @@ def run_ml_inference(job_id: str) -> None:
         else:
             result = _run_recommender(payload)
 
+        db.refresh(job)
+        if job.status == "cancelled":
+            logger.info("job %s cancelled during execution", job_id)
+            return
+
         job.result = result
         job.status = "complete"
         job.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         logger.info("job %s complete mode=%s", job_id, result.get("model"))
     except Exception as exc:
-        job.status = "failed"
-        job.error = str(exc)
-        job.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        db.commit()
-        logger.exception("job %s failed", job_id)
-        raise
+        retry_num = self.request.retries
+        countdown = (2 ** retry_num) + random.uniform(0, 0.3 * (2 ** retry_num))
+        raise self.retry(exc=exc, countdown=countdown)
     finally:
         db.close()
