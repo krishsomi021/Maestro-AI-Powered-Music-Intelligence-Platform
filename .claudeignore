@@ -1,0 +1,14 @@
+# Personal data — never load (huge token cost, private)
+data/
+models/
+*.joblib
+*.pkl
+
+# Python noise
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets and VCS
+.env
+.git/
