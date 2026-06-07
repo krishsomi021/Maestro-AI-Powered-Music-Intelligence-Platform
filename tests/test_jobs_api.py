@@ -1,5 +1,5 @@
 import uuid
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -123,3 +123,28 @@ async def test_dead_letter_empty(client):
     data = resp.json()
     assert data["total"] == 0
     assert data["jobs"] == []
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_exceeded_returns_429(client):
+    """Verify that POST /jobs returns 429 when the rate limiter raises RateLimitExceeded."""
+    from app.core.rate_limit import limiter
+    from slowapi.errors import RateLimitExceeded
+
+    mock_limit = MagicMock(error_message="100 per 1 minute")
+
+    def _fake_check_request_limit(request, endpoint_func, in_middleware=True):
+        # slowapi reads request.state.view_rate_limit in the error handler;
+        # set it to None so _inject_headers skips header injection cleanly.
+        request.state.view_rate_limit = None
+        raise RateLimitExceeded(mock_limit)
+
+    with patch.object(limiter, "enabled", True), \
+         patch.object(limiter, "_check_request_limit", _fake_check_request_limit):
+        resp = await client.post(
+            "/jobs",
+            json={"job_type": "etl_pipeline", "payload": {"source": "a", "destination": "b"}},
+        )
+
+    assert resp.status_code == 429
+    assert "Rate limit exceeded" in resp.json()["error"]

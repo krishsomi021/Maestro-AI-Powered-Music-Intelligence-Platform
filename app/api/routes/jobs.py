@@ -1,12 +1,13 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dao import job_dao
 from app.api.services import job_service
 from app.core.enums import JobStatus
+from app.core.rate_limit import limiter
 from app.db.async_session import get_db
 from app.models.job import Job
 from app.schemas.job import (
@@ -46,7 +47,9 @@ async def list_dead_letter_jobs(limit: int = 20, db: AsyncSession = Depends(get_
 
 
 @router.post("", response_model=JobCreateResponse)
+@limiter.limit("100/minute")
 async def submit_job_route(
+    request: Request,
     body: JobSubmitRequest,
     response: Response,
     db: AsyncSession = Depends(get_db),
@@ -71,7 +74,8 @@ async def list_jobs(limit: int = 20, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/{job_id}", response_model=CancelJobResponse)
-async def cancel_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+@limiter.limit("100/minute")
+async def cancel_job(request: Request, job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     result = await job_service.cancel_job(db, job_id)
     if not result["found"]:
         raise HTTPException(status_code=404, detail="Job not found")
