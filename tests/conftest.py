@@ -12,37 +12,49 @@ from sqlalchemy.orm import sessionmaker
 from app.config import settings
 from app.db.async_session import get_db
 from app.main import app
-from app.models.job import Base
-from app.models.listening_history import ListeningHistory
 
 
 @pytest_asyncio.fixture
 async def db_session():
+    """Joined to an external transaction rolled back on teardown — never creates or
+    drops tables, so the real jobs/listening_history schema (owned by migrations/init.sql)
+    and any pre-existing rows are left exactly as found."""
     engine = create_async_engine(settings.async_database_url, echo=False)
     try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-        async with session_factory() as session:
-            yield session
+        async with engine.connect() as conn:
+            trans = await conn.begin()
+            session_factory = async_sessionmaker(
+                bind=conn,
+                class_=AsyncSession,
+                expire_on_commit=False,
+                join_transaction_mode="create_savepoint",
+            )
+            session = session_factory()
+            try:
+                yield session
+            finally:
+                await session.close()
+                await trans.rollback()
     finally:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
         await engine.dispose()
 
 
 @pytest.fixture
 def sync_db_session():
-    """Sync session for worker-layer tests — same database as db_session, accessed via the sync driver."""
+    """Sync counterpart of db_session for worker-layer tests — same join-transaction/
+    rollback isolation, same rule: never creates or drops tables."""
     engine = create_engine(settings.sync_database_url)
-    ListeningHistory.__table__.create(bind=engine, checkfirst=True)
-    session_factory = sessionmaker(bind=engine)
-    session = session_factory()
     try:
-        yield session
+        with engine.connect() as conn:
+            trans = conn.begin()
+            session_factory = sessionmaker(bind=conn, join_transaction_mode="create_savepoint")
+            session = session_factory()
+            try:
+                yield session
+            finally:
+                session.close()
+                trans.rollback()
     finally:
-        session.close()
-        ListeningHistory.__table__.drop(bind=engine, checkfirst=True)
         engine.dispose()
 
 

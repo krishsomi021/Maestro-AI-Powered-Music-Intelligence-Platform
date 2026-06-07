@@ -49,16 +49,20 @@ def test_etl_idempotent(sync_db_session):
         },
     ]
 
+    def row_count():
+        return sync_db_session.execute(select(func.count()).select_from(ListeningHistory)).scalar_one()
+
+    baseline = row_count()
+
     first = _load(sync_db_session, rows)
     assert first["new_records_loaded"] == 2
     assert first["duplicate_records_skipped"] == 0
+    assert row_count() == baseline + 2
 
     second = _load(sync_db_session, rows)
     assert second["new_records_loaded"] == 0
     assert second["duplicate_records_skipped"] > 0
-
-    count = sync_db_session.execute(select(func.count()).select_from(ListeningHistory)).scalar_one()
-    assert count == 2
+    assert row_count() == baseline + 2
 
 
 # ---------------------------------------------------------------------------
