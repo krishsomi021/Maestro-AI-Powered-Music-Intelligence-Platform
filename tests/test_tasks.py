@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -162,14 +163,25 @@ def test_spotify_recommender_unknown_seeds_returns_empty(mock_get_db, mock_load_
 # Other worker tasks (unchanged)
 # ---------------------------------------------------------------------------
 
+@patch("worker.tasks.etl_pipeline._extract")
+@patch("worker.tasks.etl_pipeline._find_source_files")
 @patch("worker.tasks.etl_pipeline.get_sync_db")
-@patch("worker.tasks.etl_pipeline.time.sleep")
-def test_etl_pipeline_task(mock_sleep, mock_get_db):
+def test_etl_pipeline_task(mock_get_db, mock_find_files, mock_extract):
     job_id = str(uuid.uuid4())
-    mock_job = _make_job(job_id, {"source": "raw", "destination": "clean"})
+    mock_job = _make_job(job_id, {"source": "data/spotify_export"})
     mock_db = MagicMock()
     mock_db.get.return_value = mock_job
     mock_get_db.return_value = mock_db
+
+    mock_find_files.return_value = [Path("data/spotify_export/StreamingHistory_music_0.json")]
+    mock_extract.return_value = [
+        {"endTime": "2025-06-10 15:29", "artistName": "Arctic Monkeys", "trackName": "505", "msPlayed": 200000},
+        {"endTime": "2025-06-10 15:35", "artistName": "Arctic Monkeys", "trackName": "Short", "msPlayed": 5000},
+    ]
+
+    mock_result = MagicMock()
+    mock_result.rowcount = 1
+    mock_db.execute.return_value = mock_result
 
     from worker.tasks.etl_pipeline import run_etl_pipeline
 
@@ -177,7 +189,11 @@ def test_etl_pipeline_task(mock_sleep, mock_get_db):
 
     assert mock_job.status == "complete"
     assert mock_job.result is not None
-    assert "rows_processed" in mock_job.result
+    assert mock_job.result["pipeline"] == "spotify_etl"
+    assert mock_job.result["total_extracted"] == 2
+    assert mock_job.result["skipped_short_plays"] == 1
+    assert mock_job.result["new_records_loaded"] == 1
+    assert mock_job.result["source_files"] == ["StreamingHistory_music_0.json"]
     mock_db.commit.assert_called()
     mock_db.close.assert_called_once()
 
@@ -202,18 +218,20 @@ def test_report_generation_task(mock_sleep, mock_get_db):
     mock_db.close.assert_called_once()
 
 
+@patch("worker.tasks.etl_pipeline._extract")
+@patch("worker.tasks.etl_pipeline._find_source_files")
 @patch("worker.tasks.etl_pipeline.get_sync_db")
-@patch("worker.tasks.etl_pipeline.time.sleep")
-def test_etl_cancelled_job_skips_completion(mock_sleep, mock_get_db):
-    """Worker checks status after sleep; if cancelled it exits without setting complete."""
+def test_etl_cancelled_job_skips_completion(mock_get_db, mock_find_files, mock_extract):
+    """Worker checks status after extract/transform; if cancelled it exits without loading or completing."""
     job_id = str(uuid.uuid4())
-    mock_job = _make_job(job_id, {"source": "a", "destination": "b"}, status="running")
+    mock_job = _make_job(job_id, {"source": "data/spotify_export"}, status="running")
 
-    call_count = 0
+    mock_find_files.return_value = [Path("data/spotify_export/StreamingHistory_music_0.json")]
+    mock_extract.return_value = [
+        {"endTime": "2025-06-10 15:29", "artistName": "Arctic Monkeys", "trackName": "505", "msPlayed": 200000},
+    ]
 
     def refresh_side_effect(job):
-        nonlocal call_count
-        call_count += 1
         job.status = "cancelled"
 
     mock_db = MagicMock()
@@ -226,6 +244,7 @@ def test_etl_cancelled_job_skips_completion(mock_sleep, mock_get_db):
     run_etl_pipeline(job_id)
 
     assert mock_job.status == "cancelled"
+    mock_db.execute.assert_not_called()
     mock_db.close.assert_called_once()
 
 

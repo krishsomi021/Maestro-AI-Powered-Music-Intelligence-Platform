@@ -15,3 +15,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_idempotency_key ON jobs (idempotency_key)
     WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS listening_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    artist_name VARCHAR NOT NULL,
+    track_name VARCHAR NOT NULL,
+    end_time TIMESTAMP NOT NULL,
+    ms_played INTEGER NOT NULL,
+    imported_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(artist_name, track_name, end_time)
+);

@@ -57,7 +57,7 @@ See [architecture.md](architecture.md) for the full system design and data model
 | Job | Type | Behavior |
 |---|---|---|
 | ML Inference | **Real** | Loads a pre-trained Random Forest fraud detection model, runs `.predict()` on 14 input features, returns fraud/not-fraud prediction in ~53ms |
-| ETL Pipeline | Mocked | Simulates a data transform pipeline (5–8s), returns rows processed and duration |
+| ETL Pipeline | **Real** | Extracts Spotify streaming history JSON from disk, filters and cleans plays, loads them into `listening_history` (idempotent via `INSERT ... ON CONFLICT DO NOTHING`), returns extraction/load stats |
 | Report Generation | Mocked | Simulates PDF report generation (3–6s), returns report metadata |
 
 ---
@@ -185,16 +185,61 @@ curl "http://localhost:8000/jobs?limit=20"
 
 ### Example: ETL Pipeline job
 
+Extracts Spotify streaming history from `StreamingHistory_music_*.json` files in `payload.source` (defaults to `data/spotify_export`), filters out short plays (<30s), missing artist/track names, and podcast entries, and loads the cleaned plays into the `listening_history` table. Re-running the job is safe — duplicate plays are skipped via a `UNIQUE(artist_name, track_name, end_time)` constraint with `INSERT ... ON CONFLICT DO NOTHING`.
+
 ```bash
 curl -X POST http://localhost:8000/jobs \
   -H "Content-Type: application/json" \
   -d '{
     "job_type": "etl_pipeline",
     "payload": {
-      "source": "raw_transactions",
-      "destination": "clean_transactions"
+      "source": "data/spotify_export",
+      "destination": "listening_history"
     }
   }'
+```
+
+Result shape on completion:
+```json
+{
+  "status": "success",
+  "total_extracted": 16656,
+  "skipped_short_plays": 9301,
+  "skipped_invalid": 12,
+  "new_records_loaded": 7355,
+  "duplicate_records_skipped": 0,
+  "source_files": ["StreamingHistory_music_0.json", "StreamingHistory_music_1.json"],
+  "pipeline": "spotify_etl"
+}
+```
+
+If `source` does not exist or contains no streaming history files, the job fails cleanly with `status: failed` and a descriptive `error` — it does not retry or crash the worker.
+
+---
+
+### Listening history stats
+
+Read-only endpoints over the `listening_history` table populated by the ETL pipeline.
+
+```bash
+curl "http://localhost:8000/stats/top-tracks?limit=10"
+curl "http://localhost:8000/stats/top-artists?limit=10"
+curl "http://localhost:8000/stats/listening-trends"
+```
+
+`GET /stats/top-tracks` response:
+```json
+{ "tracks": [ { "track_name": "505", "artist_name": "Arctic Monkeys", "play_count": 47, "total_ms_played": 1234567 } ] }
+```
+
+`GET /stats/top-artists` response:
+```json
+{ "artists": [ { "artist_name": "Arctic Monkeys", "play_count": 312, "total_ms_played": 8765432, "unique_tracks": 24 } ] }
+```
+
+`GET /stats/listening-trends` response:
+```json
+{ "trends": [ { "month": "2025-06", "play_count": 423, "total_ms_played": 12345678 } ] }
 ```
 
 ---
@@ -260,17 +305,21 @@ job-processing-platform/
 │   ├── config.py                  # Settings loaded from environment
 │   ├── api/
 │   │   └── routes/
-│   │       └── jobs.py            # POST /jobs, GET /jobs/{id}, GET /jobs
+│   │       ├── jobs.py            # POST /jobs, GET /jobs/{id}, GET /jobs
+│   │       └── stats.py           # GET /stats/top-tracks, /top-artists, /listening-trends
 │   │   └── services/
 │   │       └── job_service.py     # Business logic — submit, enqueue
 │   │   └── dao/
-│   │       └── job_dao.py         # Database operations — create, get, list
+│   │       ├── job_dao.py         # Database operations — create, get, list
+│   │       └── stats_dao.py       # Aggregate queries over listening_history
 │   ├── db/
 │   │   └── async_session.py       # Async SQLAlchemy engine (FastAPI)
 │   ├── models/
-│   │   └── job.py                 # SQLAlchemy ORM model
+│   │   ├── job.py                 # SQLAlchemy ORM model
+│   │   └── listening_history.py   # SQLAlchemy ORM model — Spotify play history
 │   ├── schemas/
-│   │   └── job.py                 # Pydantic request/response schemas
+│   │   ├── job.py                 # Pydantic request/response schemas
+│   │   └── stats.py               # Pydantic response schemas for /stats endpoints
 │   └── core/
 │       ├── enums.py               # JobType and JobStatus enums
 │       └── rate_limit.py          # slowapi Limiter (Redis-backed, 100 req/min)
@@ -281,16 +330,17 @@ job-processing-platform/
 │   │   └── sync_session.py        # Sync SQLAlchemy engine (Celery)
 │   └── tasks/
 │       ├── ml_inference.py        # Real ML inference task
-│       ├── etl_pipeline.py        # Mocked ETL task
+│       ├── etl_pipeline.py        # Real ETL task — Spotify streaming history → listening_history
 │       └── report_generation.py   # Mocked report task
 │
 ├── models/                        # Model files — gitignored
 ├── migrations/
-│   └── init.sql                   # Jobs table schema
+│   └── init.sql                   # jobs + listening_history table schema
 ├── tests/
 │   ├── conftest.py                # Fixtures
-│   ├── test_jobs_api.py           # 7 API tests
-│   └── test_tasks.py              # 2 worker unit tests
+│   ├── test_jobs_api.py           # API tests
+│   ├── test_tasks.py              # Worker unit tests
+│   └── test_etl_pipeline.py       # ETL transform/load + stats endpoint tests
 │
 ├── .github/workflows/ci.yml       # GitHub Actions CI
 ├── docker-compose.yml             # 4 services: fastapi, worker, redis, postgres
@@ -306,19 +356,9 @@ job-processing-platform/
 docker compose exec fastapi pytest tests/ -v
 ```
 
-Expected output:
+Covers the job API (submission, polling, idempotency, cancellation, dead-letter, rate limiting), worker task logic (ML inference, ETL pipeline, report generation, retry/dead-letter behavior), and the ETL/stats pipeline (filtering, idempotent loading, `/stats/*` endpoints):
 ```
-tests/test_jobs_api.py::test_submit_ml_inference_job       PASSED
-tests/test_jobs_api.py::test_submit_etl_pipeline_job       PASSED
-tests/test_jobs_api.py::test_submit_report_generation_job  PASSED
-tests/test_jobs_api.py::test_submit_invalid_job_type       PASSED
-tests/test_jobs_api.py::test_get_job                       PASSED
-tests/test_jobs_api.py::test_get_job_not_found             PASSED
-tests/test_jobs_api.py::test_list_jobs                     PASSED
-tests/test_tasks.py::test_etl_task                         PASSED
-tests/test_tasks.py::test_report_task                      PASSED
-
-9 passed
+28 passed
 ```
 
 CI runs the full test suite automatically on every push to main via GitHub Actions.
