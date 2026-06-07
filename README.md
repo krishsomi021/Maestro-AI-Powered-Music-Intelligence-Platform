@@ -215,14 +215,39 @@ curl -X POST http://localhost:8000/jobs \
 
 ---
 
+### Rate limiting
+
+`POST /jobs` and `DELETE /jobs/{id}` are rate limited to **100 requests per minute per client IP**. Exceeding the limit returns `429 Too Many Requests` with a `Retry-After` header.
+
+GET endpoints are not rate limited — reads are cheap and polling is the intended client pattern.
+
+Rate limit counters are stored in Redis (the same instance used as the Celery broker), so the limit is enforced consistently across multiple FastAPI replicas.
+
+---
+
+### Response codes
+
+| Code | Meaning |
+|---|---|
+| `202 Accepted` | New job submitted successfully |
+| `200 OK` | Duplicate job (idempotency key match) |
+| `404 Not Found` | Job ID does not exist |
+| `409 Conflict` | Cannot cancel a job in a terminal state |
+| `422 Unprocessable Entity` | Invalid request body |
+| `429 Too Many Requests` | Rate limit exceeded on POST or DELETE |
+
+---
+
 ### Job status values
 
 | Status | Meaning |
 |---|---|
 | `pending` | Job submitted, waiting for a worker |
 | `running` | Worker is executing the job |
+| `retrying` | Worker encountered an error and is retrying with backoff |
 | `complete` | Job finished successfully, result is available |
-| `failed` | Job encountered an error, error message is available |
+| `failed` | Job exceeded max retries, error message is available |
+| `cancelled` | Job was cancelled before or during execution |
 
 ---
 
@@ -247,7 +272,8 @@ job-processing-platform/
 │   ├── schemas/
 │   │   └── job.py                 # Pydantic request/response schemas
 │   └── core/
-│       └── enums.py               # JobType and JobStatus enums
+│       ├── enums.py               # JobType and JobStatus enums
+│       └── rate_limit.py          # slowapi Limiter (Redis-backed, 100 req/min)
 │
 ├── worker/
 │   ├── celery_app.py              # Celery instance, broker config

@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     log_level: str = "info"
+    rate_limit_enabled: bool = True
 
     @property
     def async_database_url(self) -> str:

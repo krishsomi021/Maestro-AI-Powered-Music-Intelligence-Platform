@@ -67,14 +67,18 @@ The public-facing API. Validates incoming requests with Pydantic v2, writes the 
 Uses **async SQLAlchemy + asyncpg** so database calls never block the event loop.
 
 Endpoints:
-- `POST /jobs` — validate payload, check idempotency key, persist job as `pending`, enqueue task, return `job_id` (202 new / 200 duplicate)
+- `POST /jobs` — validate payload, check idempotency key, persist job as `pending`, enqueue task, return `job_id` (202 new / 200 duplicate). **Rate limited: 100 req/min per IP.**
 - `GET /jobs/{id}` — read current status and result for one job
 - `GET /jobs` — list recent jobs with statuses (default limit: 20)
-- `DELETE /jobs/{id}` — cancel a pending or running job; revokes the Celery task and sets `status = cancelled`
+- `DELETE /jobs/{id}` — cancel a pending or running job; revokes the Celery task and sets `status = cancelled`. **Rate limited: 100 req/min per IP.**
 - `GET /jobs/dead-letter` — list permanently-failed jobs (status=failed AND retry_count >= max_retries)
 
-### Redis — the Message Broker
+Rate limiting uses **slowapi** with **Redis** as the storage backend so limits are shared across multiple FastAPI replicas. Returns `429 Too Many Requests` when exceeded.
+
+### Redis — the Message Broker and Rate Limit Store
 Sits between the API and the workers. Holds pending tasks until a worker is free. Enables load smoothing during traffic spikes and buffers work when all workers are busy.
+
+Redis serves a dual role: it is the **Celery message broker** (task queue) and the **rate limit counter store** (slowapi backend). The same Redis instance handles both — they use separate key namespaces automatically.
 
 Critical config: `task_acks_late = True` — a task is only removed from Redis after a worker finishes it, not when it picks it up. If a worker crashes mid-execution the task returns to the queue rather than being silently lost.
 
