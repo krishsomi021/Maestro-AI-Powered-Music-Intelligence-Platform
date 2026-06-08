@@ -79,6 +79,7 @@ Endpoints:
 - `DELETE /jobs/{id}` — cancel a pending or running job; revokes the Celery task and sets `status = cancelled`. **Rate limited: 100 req/min per IP.**
 - `GET /jobs/dead-letter` — list permanently-failed jobs (status=failed AND retry_count >= max_retries)
 - `GET /stats/top-tracks`, `GET /stats/top-artists`, `GET /stats/listening-trends` — read-only aggregate queries over `listening_history`, populated by the ETL pipeline. Query the DAO layer directly (no service layer — same pattern as `GET /jobs/{id}` and `GET /jobs`).
+- `GET /tracks/search` — looks up Spotify URIs by track/artist name substring match, read-only over the `uri_to_meta` metadata embedded in `models/spotify_recommender.joblib` (lazily loaded and cached, same pattern as the worker's `_load_recommender_model`). Powers the dashboard's seed-track picker for `ml_inference` recommendation jobs; returns an empty list if the model file is absent.
 
 Rate limiting uses **slowapi** with **Redis** as the storage backend so limits are shared across multiple FastAPI replicas. Returns `429 Too Many Requests` when exceeded.
 

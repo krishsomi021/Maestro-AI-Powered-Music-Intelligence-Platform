@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     beat_etl_hour: int = 0
     beat_etl_minute: int = 0
 
+    cors_origins: str = "http://localhost:5173"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
     @property
     def async_database_url(self) -> str:
         return (
