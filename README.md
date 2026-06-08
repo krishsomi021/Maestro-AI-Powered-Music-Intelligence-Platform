@@ -365,6 +365,23 @@ CI runs the full test suite automatically on every push to main via GitHub Actio
 
 ---
 
+## Frontend Dashboard
+
+A React + Vite single-page dashboard lives in `frontend/` — job monitoring (submit/cancel/poll),
+queue statistics, Spotify recommendations (with listening analytics), and job execution history.
+
+```bash
+cd frontend
+cp .env.example .env.local   # set VITE_API_BASE_URL if the API isn't on localhost:8000
+npm install
+npm run dev                  # served at http://localhost:5173
+```
+
+It talks to the FastAPI backend over HTTP — make sure `docker compose up` (or the API locally)
+is running first. CORS is configured via `cors_origins` in `app/config.py`.
+
+---
+
 ## Key Design Decisions
 
 **`task_acks_late = True`** — Celery's default acknowledges a task on receipt. If a worker crashes mid-execution the job is permanently lost. This setting delays acknowledgment until after completion, so a crashed worker returns the task to the queue automatically.

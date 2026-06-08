@@ -1,0 +1,21 @@
+.card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+  background: var(--color-bg);
+}
+
+.card__header h2 {
+  margin-bottom: var(--space-1);
+}
+
+.card__description {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  margin: 0 0 var(--space-2) 0;
+}
+
+.card__body {
+  margin-top: var(--space-2);
+}

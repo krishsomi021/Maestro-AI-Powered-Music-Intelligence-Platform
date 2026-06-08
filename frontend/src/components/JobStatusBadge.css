@@ -1,0 +1,36 @@
+.job-status-badge {
+  display: inline-block;
+  padding: 4px var(--space-1);
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.job-status-badge--pending,
+.job-status-badge--retrying {
+  background: #fdf3e0;
+  color: var(--color-warning);
+}
+
+.job-status-badge--running {
+  background: var(--color-accent-bg);
+  color: var(--color-accent);
+}
+
+.job-status-badge--complete {
+  background: #e3f5ea;
+  color: var(--color-success);
+}
+
+.job-status-badge--failed {
+  background: #fbe7e4;
+  color: var(--color-error);
+}
+
+.job-status-badge--cancelled {
+  background: var(--color-bg-subtle);
+  color: var(--color-text-muted);
+}

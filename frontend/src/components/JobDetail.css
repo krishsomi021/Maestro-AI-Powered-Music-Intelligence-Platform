@@ -1,0 +1,56 @@
+.job-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.job-detail__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.job-detail__header code {
+  color: var(--color-text-muted);
+}
+
+.job-detail__meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.job-detail__meta dt {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+}
+
+.job-detail__meta dd {
+  margin: 0;
+  font-size: 14px;
+}
+
+.job-detail__error {
+  color: var(--color-error);
+  background: #fbe7e4;
+  border-color: var(--color-error);
+}
+
+.job-detail__error-text {
+  color: var(--color-error);
+  font-size: 13px;
+  margin: var(--space-1) 0 0 0;
+}
+
+.job-detail__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}

@@ -1,0 +1,13 @@
+.job-table__empty {
+  color: var(--color-text-muted);
+  font-size: 14px;
+}
+
+.job-table__row--selected {
+  background: var(--color-accent-bg);
+}
+
+.job-table button.secondary {
+  padding: 4px var(--space-1);
+  font-size: 13px;
+}

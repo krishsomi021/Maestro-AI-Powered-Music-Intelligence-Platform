@@ -1,0 +1,33 @@
+.submit-job-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 480px;
+}
+
+.submit-job-form textarea {
+  font-family: ui-monospace, Consolas, monospace;
+  resize: vertical;
+}
+
+.submit-job-form__hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin: var(--space-1) 0 0 0;
+}
+
+.submit-job-form__hint code {
+  white-space: pre-wrap;
+}
+
+.submit-job-form__error {
+  color: var(--color-error);
+  font-size: 13px;
+  margin: 0;
+}
+
+.submit-job-form__success {
+  color: var(--color-success);
+  font-size: 13px;
+  margin: 0;
+}

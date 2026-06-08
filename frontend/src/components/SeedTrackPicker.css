@@ -1,0 +1,55 @@
+.seed-track-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 480px;
+}
+
+.seed-track-picker__status {
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin: 4px 0 0 0;
+}
+
+.seed-track-picker__error {
+  color: var(--color-error);
+}
+
+.seed-track-picker__results,
+.seed-track-picker__seeds {
+  list-style: none;
+  margin: var(--space-1) 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.seed-track-picker__results button {
+  width: 100%;
+  text-align: left;
+}
+
+.seed-track-picker__empty {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.seed-track-picker__seeds li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.seed-track-picker__seeds button {
+  flex-shrink: 0;
+  padding: 4px var(--space-1);
+  font-size: 12px;
+}

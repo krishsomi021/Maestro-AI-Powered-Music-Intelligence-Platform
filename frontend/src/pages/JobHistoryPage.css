@@ -1,0 +1,9 @@
+.job-history__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.job-history__filters > div {
+  min-width: 200px;
+}
