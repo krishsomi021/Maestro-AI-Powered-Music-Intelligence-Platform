@@ -1,6 +1,7 @@
 import logging
 
 from celery import Celery
+from celery.schedules import crontab
 
 from app.config import settings
 
@@ -15,6 +16,7 @@ celery_app = Celery(
         "worker.tasks.ml_inference",
         "worker.tasks.etl_pipeline",
         "worker.tasks.report_generation",
+        "worker.tasks.scheduled",
     ],
 )
 
@@ -26,4 +28,10 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_default_queue="celery",
+    beat_schedule={
+        "trigger-etl-sync-daily": {
+            "task": "worker.tasks.scheduled.trigger_etl_sync",
+            "schedule": crontab(hour=settings.beat_etl_hour, minute=settings.beat_etl_minute),
+        },
+    },
 )

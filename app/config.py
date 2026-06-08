@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     log_level: str = "info"
     rate_limit_enabled: bool = True
 
+    beat_etl_hour: int = 0
+    beat_etl_minute: int = 0
+
     @property
     def async_database_url(self) -> str:
         return (

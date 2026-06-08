@@ -8,4 +8,6 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 /data/
+celerybeat-schedule
+celerybeat.pid
 

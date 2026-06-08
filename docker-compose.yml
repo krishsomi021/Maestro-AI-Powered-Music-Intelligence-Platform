@@ -55,6 +55,18 @@ services:
     volumes:
       - .:/app
 
+  beat:
+    build: .
+    command: celery -A worker.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   flower:
     build: .
     command: celery -A worker.celery_app flower --port=5555
