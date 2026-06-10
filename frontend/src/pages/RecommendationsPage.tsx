@@ -12,8 +12,24 @@ import './RecommendationsPage.css';
 
 const TOP_N = 10;
 
+type RecommenderMode = 'cooccurrence' | 'pgvector';
+
+const RECOMMENDER_OPTIONS: { value: RecommenderMode; label: string; description: string }[] = [
+  {
+    value: 'cooccurrence',
+    label: 'Collaborative (co-occurrence)',
+    description: 'Dict-based: recommends tracks that frequently appeared alongside your seeds in listening history.',
+  },
+  {
+    value: 'pgvector',
+    label: 'Content-based (pgvector)',
+    description: 'Vector similarity: recommends tracks with similar genre/artist profiles using sentence-transformer embeddings stored in Postgres.',
+  },
+];
+
 export function RecommendationsPage() {
   const [seeds, setSeeds] = useState<TrackSearchResult[]>([]);
+  const [recommender, setRecommender] = useState<RecommenderMode>('cooccurrence');
   const [jobId, setJobId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -33,6 +49,7 @@ export function RecommendationsPage() {
       const created = await submitJob('ml_inference', {
         seed_tracks: seeds.map((s) => s.uri),
         top_n: TOP_N,
+        recommender,
       });
       setJobId(created.job_id);
     } catch (err) {
@@ -54,6 +71,23 @@ export function RecommendationsPage() {
         title="Get recommendations"
         description="Search for tracks you like, add them as seeds, then submit a recommendation job."
       >
+        <fieldset className="recommendations-page__mode-picker">
+          <legend>Recommender mode</legend>
+          {RECOMMENDER_OPTIONS.map((opt) => (
+            <label key={opt.value} className="recommendations-page__mode-option">
+              <input
+                type="radio"
+                name="recommender-mode"
+                value={opt.value}
+                checked={recommender === opt.value}
+                onChange={() => setRecommender(opt.value)}
+              />
+              <span className="recommendations-page__mode-label">{opt.label}</span>
+              <span className="recommendations-page__mode-desc">{opt.description}</span>
+            </label>
+          ))}
+        </fieldset>
+
         <SeedTrackPicker seeds={seeds} onChange={setSeeds} />
 
         <div className="recommendations-page__submit">
