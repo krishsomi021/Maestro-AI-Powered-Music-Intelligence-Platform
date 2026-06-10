@@ -1,3 +1,22 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS track_metadata (
+    id                UUID        DEFAULT gen_random_uuid() PRIMARY KEY,
+    spotify_track_id  VARCHAR,
+    artist_name       VARCHAR     NOT NULL,
+    track_name        VARCHAR     NOT NULL,
+    spotify_artist_id VARCHAR,
+    genres            TEXT[],
+    popularity        INTEGER,
+    embedding         vector(384),
+    enriched_at       TIMESTAMP   NOT NULL DEFAULT NOW(),
+    UNIQUE(artist_name, track_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_metadata_spotify_track_id
+    ON track_metadata (spotify_track_id)
+    WHERE spotify_track_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS jobs (
     id              UUID        PRIMARY KEY,
     job_type        VARCHAR     NOT NULL,
