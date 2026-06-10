@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 import joblib
 import numpy as np
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from worker.celery_app import celery_app
 from worker.db.sync_session import get_sync_db
@@ -96,6 +98,77 @@ def _run_recommender(payload: dict) -> dict:
     }
 
 
+def _run_pgvector_recommender(payload: dict, db: Session) -> dict:
+    """Content-based recommender: cosine similarity over 384-dim embeddings stored in track_metadata."""
+    seed_uris: list[str] = payload.get("seed_tracks", [])
+    top_n: int = int(payload.get("top_n", 10))
+
+    # Parse spotify_track_id from "spotify:track:{id}" URIs
+    seed_ids: list[str] = []
+    for uri in seed_uris:
+        parts = uri.split(":")
+        if len(parts) == 3 and parts[0] == "spotify" and parts[1] == "track":
+            seed_ids.append(parts[2])
+        else:
+            logger.warning("pgvector recommender: unparseable seed URI %r — skipping", uri)
+
+    if not seed_ids:
+        return {"recommendations": [], "seed_count": 0, "model": "pgvector_recommender", "top_n": top_n}
+
+    rows = db.execute(
+        text(
+            "SELECT spotify_track_id, embedding FROM track_metadata "
+            "WHERE spotify_track_id = ANY(:ids) AND embedding IS NOT NULL"
+        ),
+        {"ids": seed_ids},
+    ).fetchall()
+
+    if not rows:
+        logger.warning(
+            "pgvector recommender: none of %d seed ID(s) found in track_metadata", len(seed_ids)
+        )
+        return {"recommendations": [], "seed_count": 0, "model": "pgvector_recommender", "top_n": top_n}
+
+    found_seed_ids = {r[0] for r in rows}
+    for sid in seed_ids:
+        if sid not in found_seed_ids:
+            logger.warning("pgvector recommender: seed ID %r not in track_metadata — skipping", sid)
+
+    centroid = np.mean([np.array(r[1]) for r in rows], axis=0).tolist()
+
+    candidates = db.execute(
+        text(
+            """
+            SELECT artist_name, track_name, spotify_track_id,
+                   1 - (embedding <=> CAST(:centroid AS vector)) AS score
+            FROM track_metadata
+            WHERE embedding IS NOT NULL
+              AND (spotify_track_id IS NULL OR spotify_track_id != ALL(:seed_ids))
+            ORDER BY embedding <=> CAST(:centroid AS vector)
+            LIMIT :top_n
+            """
+        ),
+        {"centroid": str(centroid), "seed_ids": seed_ids, "top_n": top_n},
+    ).fetchall()
+
+    recommendations = [
+        {
+            "uri": f"spotify:track:{row[2]}" if row[2] else "",
+            "track_name": row[1],
+            "artist_name": row[0],
+            "score": round(float(row[3]), 6),
+        }
+        for row in candidates
+    ]
+
+    return {
+        "recommendations": recommendations,
+        "seed_count": len(rows),
+        "model": "pgvector_recommender",
+        "top_n": top_n,
+    }
+
+
 @celery_app.task(name="worker.tasks.ml_inference.run_ml_inference", bind=True, base=BaseJobTask)
 def run_ml_inference(self, job_id: str) -> None:
     from app.models.job import Job
@@ -110,6 +183,8 @@ def run_ml_inference(self, job_id: str) -> None:
         payload = job.payload
         if "features" in payload:
             result = _run_fraud_detection(payload)
+        elif payload.get("recommender") == "pgvector":
+            result = _run_pgvector_recommender(payload, db)
         else:
             result = _run_recommender(payload)
 
