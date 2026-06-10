@@ -1,7 +1,10 @@
 name: jobplatform
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 includes the vector extension.
+    # IMPORTANT: switching images requires a volume wipe on existing installs:
+    #   docker compose down -v && docker compose up --build
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
