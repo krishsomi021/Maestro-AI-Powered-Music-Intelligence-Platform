@@ -23,7 +23,7 @@ END_TIME_FORMAT = "%Y-%m-%d %H:%M"
 MIN_MS_PLAYED = 30000
 LOAD_BATCH_SIZE = 500
 ENRICH_BATCH_LIMIT = 200       # max tracks resolved per ETL run
-SEARCH_DELAY_SECONDS = 0.2     # polite delay between search_track() calls
+SEARCH_DELAY_SECONDS = 1.0   # polite delay between search_track() calls
 
 
 def _find_source_files(source_dir: Path) -> list[Path]:
