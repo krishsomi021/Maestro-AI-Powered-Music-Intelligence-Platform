@@ -134,7 +134,7 @@ def _run_pgvector_recommender(payload: dict, db: Session) -> dict:
         if sid not in found_seed_ids:
             logger.warning("pgvector recommender: seed ID %r not in track_metadata — skipping", sid)
 
-    centroid = np.mean([np.array(r[1]) for r in rows], axis=0).tolist()
+    centroid = np.mean([np.array(r[1], dtype=np.float32) for r in rows], axis=0).tolist()
 
     candidates = db.execute(
         text(
