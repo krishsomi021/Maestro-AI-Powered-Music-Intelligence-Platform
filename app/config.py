@@ -25,6 +25,26 @@ class Settings(BaseSettings):
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
 
+    # LLM / Agent
+    anthropic_api_key: str = ""
+    llm_provider: str = "anthropic"
+    agent_model: str = "claude-haiku-4-5"
+    agent_judge_model: str = "claude-sonnet-4-6"
+    agent_max_iterations: int = 6
+
+    # Agent SQL
+    agent_sql_timeout_ms: int = 5000
+    agent_sql_row_cap: int = 200
+
+    # Agent memory
+    agent_memory_ttl_seconds: int = 86400
+    agent_max_messages: int = 20
+    agent_local_tz: str = "America/New_York"
+
+    # Agent read-only role
+    agent_readonly_db_user: str = "agent_readonly"
+    agent_readonly_db_password: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
