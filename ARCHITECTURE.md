@@ -17,7 +17,7 @@
                  consumed via fetch() + ReadableStream reader
                                 │
 ┌───────────────────────────────▼──────────────────────────────────┐
-│                     FastAPI  ( /agent router )                    │
+│                     FastAPI  ( /agent router )                   │
 │                                                                   │
 │   AgentService ── orchestrates ──┐                                │
 │     ├── PromptBuilder   (live schema → system prompt)             │
