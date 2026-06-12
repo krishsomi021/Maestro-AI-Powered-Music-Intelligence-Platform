@@ -82,17 +82,25 @@ class PromptBuilder:
         samples: dict[str, dict | None] = {}
 
         # listening_history — SELECT * is safe (no oversized columns)
-        r = await db.execute(text("SELECT * FROM listening_history LIMIT 1"))
-        row = r.first()
-        samples["listening_history"] = dict(row._mapping) if row else None
+        try:
+            r = await db.execute(text("SELECT * FROM listening_history LIMIT 1"))
+            row = r.first()
+            samples["listening_history"] = dict(row._mapping) if row else None
+        except Exception:
+            samples["listening_history"] = None
 
-        # track_metadata — explicitly name columns to exclude 'embedding'
-        safe_cols = ", ".join(_TRACK_METADATA_SAFE_COLUMNS)
-        r = await db.execute(
-            text(f"SELECT {safe_cols} FROM track_metadata LIMIT 1")  # noqa: S608
-        )
-        row = r.first()
-        samples["track_metadata"] = dict(row._mapping) if row else None
+        # track_metadata — explicitly name columns to exclude 'embedding'.
+        # Wrapped in try/except because the table requires the pgvector
+        # extension; it won't exist on a fresh DB without it.
+        try:
+            safe_cols = ", ".join(_TRACK_METADATA_SAFE_COLUMNS)
+            r = await db.execute(
+                text(f"SELECT {safe_cols} FROM track_metadata LIMIT 1")  # noqa: S608
+            )
+            row = r.first()
+            samples["track_metadata"] = dict(row._mapping) if row else None
+        except Exception:
+            samples["track_metadata"] = None
 
         return samples
 
