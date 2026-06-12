@@ -10,7 +10,6 @@ The final answer is generated exactly once — there is no non-streaming complet
 
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal
@@ -83,25 +82,26 @@ class AgentLoop:
         llm: LLMProvider,
         tool_registry: Any,
         max_iterations: int = 6,
+        on_tool_call: Any | None = None,
     ) -> None:
         self._llm = llm
         self._registry = tool_registry
         self._max_iterations = max_iterations
+        self._on_tool_call = on_tool_call
 
     async def run(
         self,
         messages: list[dict],
         system: str,
         session_id: str,
-        on_tool_call: Any | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """
         Stream events for a single agent turn.
 
-        on_tool_call — optional async callable(session_id, call_id, tool_name,
-        tool_input, result, latency_ms, iteration) for audit persistence.
-        Errors in on_tool_call are silently ignored so they never surface to
-        the caller.
+        on_tool_call (constructor dep) — optional async callable for audit
+        persistence; errors are silently ignored so they never surface to the caller.
+        Signature: (*, session_id, call_id, tool_name, tool_input, result,
+        latency_ms, iteration) -> None
         """
         # Work on a local copy so the caller's list is not mutated.
         msgs: list[dict] = list(messages)
@@ -168,9 +168,9 @@ class AgentLoop:
                 )
 
                 # Audit callback — never let it crash the loop
-                if on_tool_call is not None:
+                if self._on_tool_call is not None:
                     try:
-                        await on_tool_call(
+                        await self._on_tool_call(
                             session_id=session_id,
                             call_id=call_id,
                             tool_name=tool_name,
