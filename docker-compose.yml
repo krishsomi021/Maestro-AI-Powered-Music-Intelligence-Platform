@@ -12,6 +12,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./migrations/002_agent_schema.sql:/docker-entrypoint-initdb.d/init_002_agent_schema.sql
     ports:
       - "5432:5432"
     healthcheck:
