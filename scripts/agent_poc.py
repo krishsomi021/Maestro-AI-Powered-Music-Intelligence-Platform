@@ -38,7 +38,7 @@ async def main(question: str, model: str | None) -> None:
     resolved_model = model or settings.agent_model
     print(f"[poc] model={resolved_model}  question={question!r}\n", flush=True)
 
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = create_async_engine(settings.async_database, echo=False)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with async_session() as db:
