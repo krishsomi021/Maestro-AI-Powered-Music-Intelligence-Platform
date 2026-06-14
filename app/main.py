@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from app.agent.router import router as agent_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.stats import router as stats_router
 from app.api.routes.tracks import router as tracks_router
@@ -23,6 +24,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(agent_router)
 app.include_router(jobs_router)
 app.include_router(stats_router)
 app.include_router(tracks_router)
