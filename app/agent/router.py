@@ -14,8 +14,6 @@ the session history and tool-call log remain retrievable via the GET endpoints
 after the chat window is cleared.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import json
 import uuid
