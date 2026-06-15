@@ -1,0 +1,52 @@
+.message-bubble {
+  display: flex;
+  margin-bottom: var(--space-2);
+}
+
+.message-bubble--user {
+  justify-content: flex-end;
+}
+
+.message-bubble--assistant {
+  justify-content: flex-start;
+}
+
+.message-bubble__body {
+  max-width: 80%;
+  padding: var(--space-1) var(--space-2);
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.message-bubble--user .message-bubble__body {
+  background: var(--color-accent);
+  color: #ffffff;
+  border-bottom-right-radius: 4px;
+}
+
+.message-bubble--assistant .message-bubble__body {
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-bottom-left-radius: 4px;
+  /* Widen assistant bubbles to accommodate charts */
+  max-width: 90%;
+}
+
+.message-bubble__text {
+  margin: 0;
+  font-family: inherit;
+  font-size: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+}
+
+/* Chart and tool panel sit below the prose text */
+.message-bubble--assistant .chart-renderer,
+.message-bubble--assistant .tool-panel {
+  margin-top: var(--space-2);
+}

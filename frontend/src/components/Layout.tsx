@@ -6,6 +6,7 @@ const NAV_LINKS = [
   { to: '/queue-stats', label: 'Queue Statistics' },
   { to: '/recommendations', label: 'Recommendations' },
   { to: '/history', label: 'Job History' },
+  { to: '/agent', label: 'Agent' },
 ];
 
 export function Layout() {

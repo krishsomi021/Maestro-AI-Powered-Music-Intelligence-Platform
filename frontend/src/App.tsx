@@ -4,6 +4,7 @@ import { JobMonitoringPage } from './pages/JobMonitoringPage';
 import { QueueStatisticsPage } from './pages/QueueStatisticsPage';
 import { RecommendationsPage } from './pages/RecommendationsPage';
 import { JobHistoryPage } from './pages/JobHistoryPage';
+import { AgentPage } from './pages/Agent';
 
 function App() {
   return (
@@ -13,6 +14,7 @@ function App() {
         <Route path="queue-stats" element={<QueueStatisticsPage />} />
         <Route path="recommendations" element={<RecommendationsPage />} />
         <Route path="history" element={<JobHistoryPage />} />
+        <Route path="agent" element={<AgentPage />} />
       </Route>
     </Routes>
   );
