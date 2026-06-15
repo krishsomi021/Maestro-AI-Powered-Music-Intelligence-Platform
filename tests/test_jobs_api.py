@@ -46,7 +46,7 @@ async def test_get_job_not_found(client):
 
 
 @pytest.mark.asyncio
-async def test_list_jobs(client):
+async def test_list_jobs(client, clean_jobs):
     await client.post("/jobs", json={"job_type": "etl_pipeline", "payload": {"source": "a", "destination": "b"}})
     await client.post("/jobs", json={"job_type": "report_generation", "payload": {"report_type": "monthly_summary", "date_range": {"start": "2026-01-01", "end": "2026-01-31"}}})
 

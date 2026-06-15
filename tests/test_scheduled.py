@@ -25,7 +25,7 @@ def _scheduled_jobs(sync_db_session):
     ).scalars().all())
 
 
-def test_trigger_etl_sync_creates_job(sync_db_session, monkeypatch):
+def test_trigger_etl_sync_creates_job(sync_db_session, clean_scheduled_jobs, monkeypatch):
     mock_run_etl = _run_with_session(sync_db_session, monkeypatch)
 
     jobs = _scheduled_jobs(sync_db_session)
@@ -39,7 +39,7 @@ def test_trigger_etl_sync_creates_job(sync_db_session, monkeypatch):
     mock_run_etl.apply_async.assert_called_once_with(args=[str(job.id)], task_id=str(job.id))
 
 
-def test_trigger_etl_sync_skips_when_active_job_exists(sync_db_session, monkeypatch):
+def test_trigger_etl_sync_skips_when_active_job_exists(sync_db_session, clean_scheduled_jobs, monkeypatch):
     sync_db_session.add(Job(
         job_type="etl_pipeline",
         status="running",
@@ -55,7 +55,7 @@ def test_trigger_etl_sync_skips_when_active_job_exists(sync_db_session, monkeypa
     mock_run_etl.apply_async.assert_not_called()
 
 
-def test_trigger_etl_sync_creates_new_job_after_terminal_job(sync_db_session, monkeypatch):
+def test_trigger_etl_sync_creates_new_job_after_terminal_job(sync_db_session, clean_scheduled_jobs, monkeypatch):
     sync_db_session.add(Job(
         job_type="etl_pipeline",
         status="complete",

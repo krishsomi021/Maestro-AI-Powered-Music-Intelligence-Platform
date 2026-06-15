@@ -122,6 +122,66 @@ class TestPostMessage:
         )
         assert response.status_code == 422
 
+    @pytest.mark.asyncio
+    async def test_chart_spec_propagates_through_sse(self, client):
+        """chart_spec attached to a ToolResult flows through the full SSE stack and
+        appears in the tool_end frame received by the client."""
+        from app.llm.base import ToolUseEvent
+        from app.tools.base import ToolResult
+
+        sid = _sid()
+        chart = {"type": "bar", "title": "Top Artists", "x": ["A", "B"], "y": [10, 5]}
+
+        # Build two call sequences: first yields a tool_use, second yields the text answer.
+        async def _tool_then_text(*args, **kwargs):
+            call_count = getattr(_tool_then_text, "_n", 0)
+            _tool_then_text._n = call_count + 1
+            if call_count == 0:
+                e = ToolUseEvent()
+                e.id = "chart-call-1"
+                e.name = "listening_stats"
+                e.input = {"metric": "top_artists"}
+                yield e
+                s = MessageStopEvent()
+                s.stop_reason = "tool_use"
+                s.input_tokens = 5
+                s.output_tokens = 5
+                yield s
+            else:
+                t = TextDeltaEvent()
+                t.text = "Here are your top artists."
+                yield t
+                s = MessageStopEvent()
+                s.stop_reason = "end_turn"
+                s.input_tokens = 5
+                s.output_tokens = 10
+                yield s
+
+        _tool_then_text._n = 0
+        mock_llm = MagicMock()
+        mock_llm.stream = _tool_then_text
+
+        mock_registry = MagicMock()
+        mock_registry.schemas = []
+        mock_registry.execute = AsyncMock(return_value=ToolResult(
+            success=True,
+            data=[{"artist_name": "A", "play_count": 10}],
+            chart_spec=chart,
+        ))
+
+        with patch("app.agent.service.get_llm_provider", return_value=mock_llm), \
+             patch("app.agent.service.build_default_registry", return_value=mock_registry):
+            response = await client.post(
+                "/agent/message",
+                json={"session_id": sid, "user_message": "Top artists?"},
+            )
+
+        assert response.status_code == 200
+        events = _parse_sse(response.text)
+        tool_end_events = [e for e in events if e["type"] == "tool_end"]
+        assert len(tool_end_events) >= 1
+        assert tool_end_events[0]["chart_spec"] == chart
+
 
 # ---------------------------------------------------------------------------
 # DELETE /agent/session/{session_id}
@@ -138,6 +198,44 @@ class TestDeleteSession:
         # Clear on a key that doesn't exist must still succeed
         response = await client.delete("/agent/session/does-not-exist")
         assert response.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_delete_clears_redis_but_postgres_persists(self, client, db_session):
+        """DELETE /agent/session/{id} clears Redis hot memory only.
+        Postgres audit rows survive; a subsequent POST starts fresh (empty Redis
+        history) with turn_index derived from Postgres."""
+        sid = _sid()
+        mock_llm = _make_text_llm("first response")
+
+        # First turn — populates Redis and Postgres
+        with patch("app.agent.service.get_llm_provider", return_value=mock_llm):
+            r1 = await client.post(
+                "/agent/message",
+                json={"session_id": sid, "user_message": "Hello"},
+            )
+        assert r1.status_code == 200
+
+        # DELETE clears Redis hot memory only
+        del_response = await client.delete(f"/agent/session/{sid}")
+        assert del_response.status_code == 204
+
+        # Postgres audit rows still present
+        msgs_response = await client.get(f"/agent/sessions/{sid}/messages")
+        assert msgs_response.status_code == 200
+        messages = msgs_response.json()
+        assert len(messages) >= 1  # at minimum the user turn is durable
+
+        # A subsequent POST on the same session_id succeeds — turn_index picks up
+        # from Postgres; the loop runs with empty Redis history (fresh context window)
+        mock_llm2 = _make_text_llm("second response")
+        with patch("app.agent.service.get_llm_provider", return_value=mock_llm2):
+            r2 = await client.post(
+                "/agent/message",
+                json={"session_id": sid, "user_message": "Second message"},
+            )
+        assert r2.status_code == 200
+        events2 = _parse_sse(r2.text)
+        assert any(e["type"] == "done" for e in events2)
 
 
 # ---------------------------------------------------------------------------

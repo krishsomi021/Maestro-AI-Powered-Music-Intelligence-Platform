@@ -5,7 +5,7 @@ os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -56,6 +56,23 @@ def sync_db_session():
                 trans.rollback()
     finally:
         engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def clean_jobs(db_session: AsyncSession):
+    """Delete all job rows within the current SAVEPOINT so row-count assertions are
+    deterministic regardless of pre-existing dev data. Rows are restored on rollback."""
+    await db_session.execute(text("DELETE FROM jobs"))
+    await db_session.flush()
+    yield
+
+
+@pytest.fixture
+def clean_scheduled_jobs(sync_db_session):
+    """Sync counterpart of clean_jobs for worker-layer scheduled-task tests."""
+    sync_db_session.execute(text("DELETE FROM jobs"))
+    sync_db_session.flush()
+    yield
 
 
 @pytest_asyncio.fixture

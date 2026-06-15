@@ -112,21 +112,25 @@ class AgentLoop:
             tool_calls_this_iter: list[dict] = []
 
             # --- stream one LLM iteration -----------------------------------
-            async for event in self._llm.stream(msgs, system, tools):
-                if event.type == "text_delta":
-                    text_produced = True
-                    yield TextChunkEvent(text=event.text)
+            try:
+                async for event in self._llm.stream(msgs, system, tools):
+                    if event.type == "text_delta":
+                        text_produced = True
+                        yield TextChunkEvent(text=event.text)
 
-                elif event.type == "tool_use":
-                    tool_calls_this_iter.append({
-                        "id": event.id,
-                        "name": event.name,
-                        "input": event.input,
-                    })
+                    elif event.type == "tool_use":
+                        tool_calls_this_iter.append({
+                            "id": event.id,
+                            "name": event.name,
+                            "input": event.input,
+                        })
 
-                elif event.type == "message_stop":
-                    # stop_reason and usage are on the event; nothing to yield here
-                    pass
+                    elif event.type == "message_stop":
+                        # stop_reason and usage are on the event; nothing to yield here
+                        pass
+            except Exception as exc:
+                yield ErrorEvent(message=str(exc))
+                return
 
             # --- pure-text iteration → answer already streamed → done ------
             if not tool_calls_this_iter:

@@ -510,6 +510,58 @@ class TestMessageListImmutability:
 
 
 # ---------------------------------------------------------------------------
+# LLM provider exception → ErrorEvent (Option 2: loop catches, yields, returns)
+# ---------------------------------------------------------------------------
+
+class TestLLMProviderException:
+    @pytest.mark.asyncio
+    async def test_llm_exception_yields_error_event(self):
+        async def _failing_stream(*args, **kwargs):
+            raise RuntimeError("Anthropic API unavailable")
+            yield  # makes this an async generator
+
+        llm = MagicMock()
+        llm.stream = _failing_stream
+        loop = AgentLoop(llm=llm, tool_registry=_mock_registry())
+        events = await _collect(loop, [])
+
+        error_events = [e for e in events if isinstance(e, ErrorEvent)]
+        assert len(error_events) == 1
+        assert "Anthropic API unavailable" in error_events[0].message
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_no_done_event(self):
+        async def _failing_stream(*args, **kwargs):
+            raise RuntimeError("provider error")
+            yield
+
+        llm = MagicMock()
+        llm.stream = _failing_stream
+        loop = AgentLoop(llm=llm, tool_registry=_mock_registry())
+        events = await _collect(loop, [])
+
+        assert not any(isinstance(e, DoneEvent) for e in events)
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_mid_stream_yields_error_event(self):
+        """Exception raised after the first text delta — partial output followed by ErrorEvent."""
+        async def _stream_then_fail(*args, **kwargs):
+            yield _text_delta("Partial answer...")
+            raise RuntimeError("connection dropped")
+
+        llm = MagicMock()
+        llm.stream = _stream_then_fail
+        loop = AgentLoop(llm=llm, tool_registry=_mock_registry())
+        events = await _collect(loop, [])
+
+        text_events = [e for e in events if isinstance(e, TextChunkEvent)]
+        error_events = [e for e in events if isinstance(e, ErrorEvent)]
+        assert len(text_events) == 1
+        assert text_events[0].text == "Partial answer..."
+        assert len(error_events) == 1
+
+
+# ---------------------------------------------------------------------------
 # _serialise helper (edge cases)
 # ---------------------------------------------------------------------------
 
