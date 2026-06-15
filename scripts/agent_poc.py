@@ -76,7 +76,7 @@ async def main(question: str, model: str | None) -> None:
 
             elif isinstance(event, ToolEndEvent):
                 status = "ok" if event.success else f"ERROR: {event.error}"
-                chart = f" chart={event.chart_spec['chart_type']!r}" if event.chart_spec else ""
+                chart = f" chart={event.chart_spec['type']!r}" if event.chart_spec else ""
                 print(
                     f"[tool_end]   iter={event.iteration} "
                     f"tool={event.tool_name} {status}{chart} latency={event.latency_ms}ms",

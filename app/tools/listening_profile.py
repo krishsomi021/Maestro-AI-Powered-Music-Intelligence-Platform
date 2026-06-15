@@ -24,7 +24,6 @@ chart_spec shape (consumed by Phase 8 frontend ChartRenderer):
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import text
@@ -56,19 +55,14 @@ class GetListeningProfileTool(BaseTool):
     async def execute(self, **_: Any) -> ToolResult:
         try:
             local_tz = self._settings.agent_local_tz
-            (
-                top_artists,
-                top_genres,
-                totals,
-                active_hour,
-                active_day,
-            ) = await asyncio.gather(
-                self._top_artists(local_tz),
-                self._top_genres(),
-                self._totals(),
-                self._most_active_hour(local_tz),
-                self._most_active_day(local_tz),
-            )
+            # Run sequentially — asyncpg does not allow concurrent operations on
+            # a single session/connection (raises "This session is provisioning a
+            # new connection; concurrent operations are not permitted").
+            top_artists = await self._top_artists(local_tz)
+            top_genres = await self._top_genres()
+            totals = await self._totals()
+            active_hour = await self._most_active_hour(local_tz)
+            active_day = await self._most_active_day(local_tz)
 
             chart_spec = {
                 "type": "bar",

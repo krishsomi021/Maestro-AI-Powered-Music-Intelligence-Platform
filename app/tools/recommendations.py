@@ -13,11 +13,27 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+import json
+
 import numpy as np
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.tools.base import BaseTool, ToolResult
+
+
+def _parse_embedding(raw) -> list[float]:
+    """
+    Normalise whatever asyncpg returns for a pgvector column into a plain float list.
+    asyncpg has no built-in pgvector codec, so the value arrives as a string like
+    "[0.1,0.2,...]". psycopg2+register_vector() returns a Python list already.
+    Handle both so the tool works regardless of driver.
+    """
+    if isinstance(raw, (list, np.ndarray)):
+        return list(raw)
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return list(raw)
 
 if TYPE_CHECKING:
     from app.config import Settings
@@ -82,7 +98,7 @@ class GetRecommendationsTool(BaseTool):
                 )
                 found = row.first()
                 if found is not None:
-                    embeddings.append(list(found.embedding))
+                    embeddings.append(_parse_embedding(found.embedding))
                     resolved_names.append(found.track_name)
 
             if not embeddings:

@@ -96,7 +96,7 @@ class TestSqlQueryToolUnit:
         mock_conn = AsyncMock()
         mock_result = MagicMock()
         mock_result.keys.return_value = ["n"]
-        mock_result.fetchmany.return_value = [(1,)]
+        mock_result.fetchmany = AsyncMock(return_value=[(1,)])
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_conn.__aexit__ = AsyncMock(return_value=False)
         mock_conn.execute = AsyncMock(return_value=mock_result)
@@ -157,7 +157,7 @@ class TestSqlQueryToolUnit:
         mock_result = MagicMock()
         mock_result.keys.return_value = ["id"]
         # Return cap+1 rows to trigger truncation
-        mock_result.fetchmany.return_value = [(i,) for i in range(cap + 1)]
+        mock_result.fetchmany = AsyncMock(return_value=[(i,) for i in range(cap + 1)])
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_conn.__aexit__ = AsyncMock(return_value=False)
         mock_conn.execute = AsyncMock(return_value=mock_result)
@@ -203,14 +203,18 @@ class TestSemanticSearchUnit:
 
     @pytest.mark.asyncio
     async def test_db_error_returns_failure(self):
+        import numpy as np
         from app.tools.semantic_search import SemanticTrackSearchTool
 
         mock_db = AsyncMock()
         mock_db.execute.side_effect = Exception("connection refused")
         tool = SemanticTrackSearchTool(db=mock_db, settings=settings)
 
+        # encode() must return a numpy array because the tool calls .tolist() on it.
+        # Patch the import site inside semantic_search.py (not the worker module directly)
+        # so the lazy import inside execute() picks up the mock.
         with patch("worker.ml.embeddings._load_embedding_model") as mock_model:
-            mock_model.return_value.encode.return_value = [0.0] * 384
+            mock_model.return_value.encode.return_value = np.zeros(384, dtype=np.float32)
             result = await tool.execute(query="test", limit=5)
 
         assert not result.success
