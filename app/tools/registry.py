@@ -43,12 +43,20 @@ class ToolRegistry:
 def build_default_registry(db: "AsyncSession", settings: "Settings") -> ToolRegistry:
     """
     Constructs and registers all available tools for a request.
-    Phase 2: registers listening_stats only.
+    RunSqlQueryTool owns its module-level readonly engine singleton — do not pass db.
     """
     from app.tools.listening_stats import ListeningStatsTool
+    from app.tools.sql_query import RunSqlQueryTool
+    from app.tools.semantic_search import SemanticTrackSearchTool
+    from app.tools.recommendations import GetRecommendationsTool
+    from app.tools.listening_profile import GetListeningProfileTool
 
     return ToolRegistry(
         tools=[
             ListeningStatsTool(db=db, settings=settings),
+            RunSqlQueryTool(settings=settings),
+            SemanticTrackSearchTool(db=db, settings=settings),
+            GetRecommendationsTool(db=db, settings=settings),
+            GetListeningProfileTool(db=db, settings=settings),
         ]
     )
