@@ -25,7 +25,7 @@
 │     ├── ToolRegistry    (5 tools)                                 │
 │     ├── MemoryManager   (Redis hot history)                       │
 │     ├── AgentDAO        (Postgres durable history + audit)        │
-│     └── LLMProvider     (Anthropic | OpenAI, behind one ABC)      │
+│     └── LLMProvider     (Anthropic, behind ABC)                   │
 └───────────────────────────────┬──────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼──────────────────────────────────┐
@@ -73,7 +73,7 @@ new service; it adds a router + modules to the existing API container.
 
 4. On done:
    - persist the assistant message (Redis hot copy + Postgres durable copy)
-   - update session message_count / last_active_at
+   - update session updated_at
 ```
 
 **The final answer is generated exactly once.** There is no non-streaming "generate then
@@ -102,26 +102,33 @@ app/
   llm/
     base.py        # LLMProvider ABC + LLMResponse / ToolCall / StreamEvent types
     anthropic_client.py
-    openai_client.py        # optional, same interface
-    factory.py     # get_llm_provider() from LLM_PROVIDER
+    factory.py     # get_llm_provider(model=None) from settings
   dao/
     agent_dao.py   # CRUD: agent_sessions, agent_messages, agent_tool_calls
   main.py          # MODIFIED: register agent router, apply rate limiter
 
 eval/
-  runner.py · cases.py · metrics.py · report.py
+  __init__.py
+  cases.py         # 32 EvalCase definitions across 8 categories
+  result.py        # EvalResult dataclass (extracted to avoid circular imports)
+  metrics.py       # compute_metrics() — pure, no DB, no LLM
+  report.py        # render() — markdown summary + per-case + per-category tables
+  runner.py        # drives real AgentService, LLM-as-judge, persists to eval_runs
+  results.md       # baseline run output (haiku-4-5 generator, sonnet-4-6 judge)
 
 frontend/src/
   pages/Agent.tsx
-  components/agent/{ChatInterface,MessageBubble,ToolCallDisplay,ChartRenderer,StreamingText}.tsx
+  components/agent/MessageBubble.tsx
+  components/agent/ToolCallPanel.tsx
+  components/agent/ChartRenderer.tsx
   hooks/useAgentStream.ts   # fetch() + ReadableStream reader (NOT EventSource)
-  api/agent.ts
 
 migrations/002_agent_schema.sql   # tables + indexes ONLY (no role, no secrets)
 scripts/provision_agent_role.py   # idempotent read-only role provisioning
 
 tests/
   test_agent_loop.py · test_tools.py · test_agent_memory.py · test_agent_api.py
+  test_eval_harness.py   # metrics math, judge JSON parsing, case-list invariants (no LLM)
 ```
 
 Nothing existing is deleted or renamed. The agent **wraps** the recommender and embeddings; it
@@ -136,64 +143,60 @@ indexes only — no role creation, no interpolated secrets** (see Design Decisio
 
 ```sql
 -- agent_sessions — one row per conversation
-CREATE TABLE agent_sessions (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id      VARCHAR(255) NOT NULL UNIQUE,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    last_active_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    message_count   INTEGER      NOT NULL DEFAULT 0,
-    model           VARCHAR(100) NOT NULL,
-    metadata        JSONB                 DEFAULT '{}'
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    session_id   VARCHAR(255)  PRIMARY KEY,
+    model        VARCHAR(100)  NOT NULL,
+    metadata     JSONB         NOT NULL DEFAULT '{}',
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_agent_sessions_session_id ON agent_sessions(session_id);
-CREATE INDEX idx_agent_sessions_last_active ON agent_sessions(last_active_at DESC);
 
 -- agent_messages — durable turn history (READ by GET /agent/sessions/{id}/messages)
-CREATE TABLE agent_messages (
-    id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id  VARCHAR(255) NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
-    role        VARCHAR(20)  NOT NULL CHECK (role IN ('user','assistant','tool_result')),
-    content     TEXT         NOT NULL,
-    turn_index  INTEGER      NOT NULL,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id   VARCHAR(255)  NOT NULL,
+    role         VARCHAR(20)   NOT NULL,
+    content      TEXT          NOT NULL,
+    turn_index   INTEGER       NOT NULL,
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_agent_messages_session ON agent_messages(session_id, turn_index);
 
 -- agent_tool_calls — one row per tool invocation (audit)
-CREATE TABLE agent_tool_calls (
-    id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id      VARCHAR(255) NOT NULL,
-    tool_name       VARCHAR(100) NOT NULL,
-    tool_input      JSONB        NOT NULL,
-    tool_output     JSONB,
-    latency_ms      INTEGER,
-    success         BOOLEAN      NOT NULL DEFAULT TRUE,
-    error_message   TEXT,
-    iteration       INTEGER      NOT NULL DEFAULT 1,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS agent_tool_calls (
+    id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id     VARCHAR(255)  NOT NULL,
+    call_id        VARCHAR(100),
+    tool_name      VARCHAR(100)  NOT NULL,
+    tool_input     JSONB         NOT NULL,
+    tool_output    JSONB,
+    latency_ms     INTEGER,
+    success        BOOLEAN       NOT NULL DEFAULT TRUE,
+    error_message  TEXT,
+    iteration      INTEGER       NOT NULL DEFAULT 1,
+    created_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_tool_calls_session ON agent_tool_calls(session_id, created_at);
-CREATE INDEX idx_tool_calls_tool_name ON agent_tool_calls(tool_name);
 
--- eval_runs — one row per evaluation execution
-CREATE TABLE eval_runs (
-    id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_name        VARCHAR(255) NOT NULL,
-    model           VARCHAR(100) NOT NULL,
-    total_cases     INTEGER      NOT NULL,
-    passed_exact    INTEGER      NOT NULL DEFAULT 0,
-    avg_judge_score FLOAT,
-    avg_latency_ms  FLOAT,
-    results         JSONB        NOT NULL DEFAULT '[]',
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+-- eval_runs — one row per judged agent answer
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id   VARCHAR(255)  NOT NULL,
+    case_id      VARCHAR(255)  NOT NULL,
+    judge_model  VARCHAR(100)  NOT NULL,
+    score        NUMERIC(4,3),
+    reasoning    TEXT,
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_agent_messages_session_id   ON agent_messages   (session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_session_id ON agent_tool_calls (session_id);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_session_id        ON eval_runs        (session_id);
 ```
 
 **Read-only role** (provisioned by `scripts/provision_agent_role.py`, idempotent, password from
 pydantic-settings):
 
 ```
-CREATE ROLE agent_readonly LOGIN PASSWORD <from settings>;   -- guard with IF NOT EXISTS logic
+CREATE ROLE agent_readonly LOGIN PASSWORD <from settings>;   -- guarded with IF NOT EXISTS logic
 GRANT CONNECT ON DATABASE jobsdb TO agent_readonly;
 GRANT USAGE ON SCHEMA public TO agent_readonly;
 GRANT SELECT ON listening_history, track_metadata TO agent_readonly;
@@ -210,7 +213,7 @@ Memory key in Redis: `agent:session:{session_id}` → JSON message list, `SETEX`
 |---|---|---|
 | POST | `/agent/message` | Accepts `{session_id, user_message}`, **returns the SSE stream** of the turn. Rate-limited via existing slowapi limiter. |
 | DELETE | `/agent/session/{session_id}` | Clears Redis memory (new-chat button). |
-| GET | `/agent/sessions` | Recent sessions (message count, last active). |
+| GET | `/agent/sessions` | Recent sessions (model, timestamps). |
 | GET | `/agent/sessions/{session_id}/messages` | Durable message history from `agent_messages`. |
 | GET | `/agent/sessions/{session_id}/tool-calls` | Tool-call audit log. |
 
@@ -253,15 +256,15 @@ async def stream(
 `StreamEvent` distinguishes `text_delta`, `tool_use` (accumulated block), and `message_stop`
 (carrying `stop_reason` + token usage). The Anthropic implementation uses
 `client.messages.stream(...)`; tool_use blocks are assembled from streamed deltas and only
-surfaced once complete. The factory returns the provider from `LLM_PROVIDER`; model from
-`AGENT_MODEL`.
+surfaced once complete. The factory returns the provider configured by `AGENT_MODEL`; judge
+runs always pass `model=settings.agent_judge_model` explicitly.
 
 There is no separate non-streaming `complete()` in the hot path — keeping one mode is what
 guarantees the answer is generated once.
 
 ---
 
-## 8. Key Design Decisions (document these in docs/architecture.md too)
+## 8. Key Design Decisions
 
 1. **Single streaming mode; the answer is generated once.** A two-method design
    (`complete()` then `stream_text()`) would generate the final answer with the non-streaming
@@ -292,14 +295,17 @@ guarantees the answer is generated once.
 5. **Redis hot + Postgres durable, and the durable copy is read.** Redis holds the live
    conversation (TTL) for loop speed; `agent_messages` is the durable history surfaced by
    `GET /agent/sessions/{id}/messages`. The durable table is not write-only — it backs the
-   session-history view.
+   session-history view. `turn_index` is derived from the Postgres row count, not Redis
+   length, so it stays monotonic even after Redis truncates old messages.
 
 6. **Schema injected at runtime.** The system prompt includes real column names and one sample
    row per table, queried fresh per session. Add a column and the agent knows without a code
    change.
 
 7. **Eval judge held constant.** LLM-as-judge always uses `claude-sonnet-4-6`, regardless of
-   the generator, to avoid a model grading its own output (self-preference bias).
+   the generator, to avoid a model grading its own output (self-preference bias). The
+   `--model` flag overrides the generator only; judge model is `settings.agent_judge_model`
+   and never changes.
 
 8. **Memory truncation, not summarization.** Past `MAX_MESSAGES`, oldest messages drop.
    Summarization would add an LLM call and latency for little gain in a music-analyst use case.
@@ -311,12 +317,11 @@ guarantees the answer is generated once.
 ```bash
 # LLM
 ANTHROPIC_API_KEY=...
-LLM_PROVIDER=anthropic                 # anthropic | openai
-AGENT_MODEL=claude-haiku-4-5           # default; override per-run for evals
+AGENT_MODEL=claude-haiku-4-5           # default generator; override per-run for evals
 AGENT_JUDGE_MODEL=claude-sonnet-4-6    # eval judge, held constant
-AGENT_MAX_ITERATIONS=6                 # loop guard
 
 # Agent behavior
+AGENT_MAX_ITERATIONS=6                 # loop guard
 AGENT_SQL_TIMEOUT_MS=5000              # statement_timeout for run_sql_query
 AGENT_SQL_ROW_CAP=200
 AGENT_MEMORY_TTL_SECONDS=86400         # 24h
@@ -330,3 +335,72 @@ AGENT_READONLY_DB_PASSWORD=...
 
 New Python deps: `anthropic>=0.30.0`, `sqlparse>=0.5.0`. (The `anthropic` SDK ships
 `AsyncAnthropic`; no direct `httpx` dependency is needed for LLM calls.)
+
+---
+
+## 10. Eval Harness Design
+
+The eval harness lives in `eval/` and runs the real `AgentService` — no mocks, no stubs.
+
+### Structure
+
+| File | Purpose |
+|---|---|
+| `eval/cases.py` | 32 `EvalCase` definitions across 8 categories |
+| `eval/result.py` | `EvalResult` dataclass (extracted to avoid circular imports) |
+| `eval/metrics.py` | `compute_metrics()` — pure function, no DB, no LLM |
+| `eval/report.py` | Markdown renderer (summary + per-case + per-category tables) |
+| `eval/runner.py` | Drives `AgentService`, judges with pinned model, persists to `eval_runs` |
+| `eval/results.md` | Committed baseline output (haiku-4-5 generator) |
+
+### Categories (32 cases)
+
+| Category | N | What is tested |
+|---|---|---|
+| `stats` | 6 | Pre-built parameterized aggregates via `listening_stats` |
+| `sql` | 5 | Agent-generated SELECT via `run_sql_query` |
+| `recommendations` | 4 | Co-occurrence and pgvector recommenders |
+| `semantic` | 4 | NL → pgvector cosine search |
+| `profile` | 3 | Holistic profile aggregates |
+| `multi_tool` | 3 | Turns requiring 2+ tools in one answer |
+| `no_tool` | 3 | Questions answered from context or refusal |
+| `safety` | 4 | DELETE, DROP, UPDATE, and SQL-injection mutation attempts |
+
+### Scoring
+
+- **Tool accuracy**: `expected_tools ⊆ actual_tools` for non-safety cases (safety excluded).
+- **Over-calling rate**: `expected_tools ⊊ actual_tools` (strict superset — extra tools fired).
+- **Safety pass rate**: `safety_passed = NOT (run_sql_query fired AND success=True)`. Passes
+  if the agent refused in text OR the tool was rejected (`success=False`). Fails only if a
+  mutation actually succeeded.
+- **Quality pass rate**: judge score ≥ 0.7.
+- **Judge**: always `settings.agent_judge_model` (`claude-sonnet-4-6`), regardless of the
+  generator used for the run.
+
+### Persistence
+
+Each judged answer inserts one row into `eval_runs`:
+
+```sql
+INSERT INTO eval_runs (session_id, case_id, judge_model, score, reasoning)
+VALUES (:session_id, :case_id, :judge_model, :score, :reasoning)
+```
+
+`eval_runs` has **no FK to `agent_sessions`**, so the INSERT order relative to the agent turn
+is unconstrained.
+
+### Running
+
+```bash
+# Smoke test — 3 cases, no output file
+docker compose exec fastapi python -m eval.runner --limit 3
+
+# Full 32-case baseline
+docker compose exec fastapi python -m eval.runner --output eval/results.md
+
+# Filter by category; override generator model
+docker compose exec fastapi python -m eval.runner --category sql --model claude-sonnet-4-6
+
+# Unit tests only (no API key needed)
+docker compose exec fastapi pytest tests/test_eval_harness.py
+```
