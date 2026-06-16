@@ -1,587 +1,326 @@
-# Distributed Job Processing Platform
+# Maestro — AI-Powered Music Intelligence Platform
 
-A backend infrastructure platform that processes long-running jobs asynchronously using **FastAPI**, **Celery**, **Redis**, and **PostgreSQL** — featuring a real fraud-detection model, a dual-strategy music recommender backed by **pgvector**, and a self-scheduling ETL pipeline.
+A multi-layer backend platform combining distributed job processing, ML inference, a self-enriching Spotify ETL pipeline, and a natural-language analyst agent — all on a shared FastAPI + Celery + PostgreSQL + Redis stack.
 
-Instead of blocking a web request while slow work runs, the platform accepts a job instantly, queues it, and processes it in the background. Clients receive a `job_id` immediately and poll for results. The same pattern used by Stripe for fraud detection, Instagram for content moderation, and Spotify for recommendation generation.
+![Agent demo](docs/demo.gif)
+
+---
+
+## What it is
+
+Maestro started as a distributed job processing backend and grew into a four-layer platform by adding each capability on top of infrastructure the previous layer already owned. The ETL pipeline fills a PostgreSQL database the job engine manages; the ML recommender reads embeddings stored by the ETL; the LLM analyst agent queries the same tables through a read-only role and calls the same recommender in-process. Nothing is a standalone microservice — each layer reuses the shared stack.
+
+The platform is designed for an AWS deployment (EC2 + RDS + ElastiCache) but all instructions here are for local Docker Compose, which runs the same six services with the same schema and role provisioning as the planned production environment.
 
 ---
 
 ## Architecture
 
+```mermaid
+graph TD
+    Client["React Dashboard\n(Job monitor · Recommendations · Agent chat)"]
+    FastAPI["FastAPI :8000\n(REST API · SSE · rate limiting)"]
+    Celery["Celery Workers\n(+ Beat scheduler · Flower :5555)"]
+    MLLayer["ML Inference · ETL Pipeline\n(Celery tasks · Random Forest · embeddings)"]
+    AgentLoop["LLM Analyst Agent\n(AgentLoop · 5 tools · SSE streaming)"]
+    Redis["Redis 7\n(broker · rate limiter · agent memory)"]
+    Postgres["PostgreSQL 16 + pgvector\n(jobs · listening_history · track_metadata\nagent_sessions · agent_messages · eval_runs)"]
+
+    Client -->|REST + SSE| FastAPI
+    FastAPI --> Celery
+    FastAPI --> AgentLoop
+    Celery --> Redis
+    Celery --> MLLayer
+    MLLayer --> Postgres
+    AgentLoop --> Postgres
+    AgentLoop --> Redis
+    FastAPI --> Postgres
 ```
-Client (Postman / curl / React dashboard)
-        │
-        ▼
-  ┌─────────────┐     ┌───────────────┐     ┌──────────────────┐
-  │   FastAPI   │────▶│     Redis     │────▶│  Celery Workers  │
-  │  (Producer) │     │   (Broker)    │     │  (Consumers)     │
-  └─────────────┘     └───────────────┘     └──────────────────┘
-        │                     ▲                       │
-        │              ┌──────────────┐               │
-        │              │  Celery Beat │               │
-        │              │ (Scheduler)  │               │
-        │              └──────────────┘               │
-        ▼                                             ▼
-  ┌──────────────────────────────────────────────────────┐
-  │                    PostgreSQL + pgvector             │
-  │               (System of Record)                     │
-  └──────────────────────────────────────────────────────┘
-```
-
-**Request flow:**
-1. Client sends `POST /jobs` → FastAPI validates payload
-2. FastAPI writes job row to Postgres with `status=pending`
-3. FastAPI enqueues Celery task to Redis → returns `job_id` instantly
-4. Worker pulls task from Redis → sets `status=running`
-5. Worker executes job logic → writes result → sets `status=complete`
-6. Client polls `GET /jobs/{id}` to retrieve result
-
-**Celery Beat** runs as a separate process and fires a scheduled ETL sync nightly — the platform produces work for itself, not just in response to API calls.
-
-See [architecture.md](docs/architecture.md) for the full system design and data model.
 
 ---
 
-## Tech Stack
+## The four layers
+
+### Distributed job processing
+
+Celery 5.4 processes three job types: ML inference, ETL pipeline, and report generation. Every worker uses `task_acks_late=True`, which delays acknowledgment until the task completes — a crashed worker returns the task to the queue automatically rather than silently dropping it. Exponential-backoff retries route permanently-failed jobs to a dead-letter queue. An idempotency key on job submission prevents duplicate processing when clients retry on uncertainty. Celery Beat runs as a dedicated service and fires a nightly ETL sync, guarded by its own idempotency key so overlapping triggers never create duplicate runs. Flower monitors queue depth and worker state at `localhost:5555`.
+
+### ML inference
+
+The `run_ml_inference` task dispatches across three modes based on payload shape. With a `features` array it runs a pre-trained Random Forest fraud-detection model (14 features, StandardScaler pipeline, ~53 ms). With `seed_tracks` and `recommender: "pgvector"` it computes a centroid over seed-track embeddings and retrieves nearest neighbors by cosine distance directly in pgvector. With `seed_tracks` alone it uses an offline-trained item-based co-occurrence collaborative filter serialized at `models/spotify_recommender.joblib`. All three modes share the same job lifecycle, retry behavior, and API surface — one task, three strategies, directly comparable.
+
+### Spotify ETL pipeline
+
+The ETL task extracts personal streaming-history JSON from disk, filters out plays shorter than 30 seconds and podcast entries, and loads cleaned plays idempotently into `listening_history` via `INSERT ... ON CONFLICT DO NOTHING`. An enrichment phase then resolves new tracks against the Spotify search API — fetching artist metadata and genres, generating `all-MiniLM-L6-v2` embeddings, and storing them as `vector(384)` in `track_metadata`. Enrichment is incremental (200 tracks per run, 1 s between Spotify calls) and non-fatal: API outages or missing credentials degrade gracefully without failing the load.
+
+### LLM Spotify Analyst Agent
+
+A custom ReAct-style agent loop (no LangChain or LlamaIndex) processes natural-language questions over the listening data. The loop streams every LLM iteration via the Anthropic streaming API, forwarding text tokens to the client as SSE events and silently accumulating tool-use blocks until complete. Five tools are registered: `listening_stats` (pre-built parameterized aggregates with server-built chart specs), `run_sql_query` (agent-generated SELECT, enforced read-only at the database role level), `get_recommendations` (wraps the dual recommender in-process), `semantic_track_search` (pgvector cosine search via query embedding), and `get_listening_profile` (bundled holistic profile query). Conversation history lives hot in Redis (24 h TTL) and durably in `agent_messages`. The React dashboard streams responses token-by-token and renders inline bar charts from `chart_spec` objects attached to tool results.
+
+---
+
+## Engineering decisions
+
+**Single streaming mode.** The final answer is generated exactly once and streamed token-by-token. A two-step design (non-streaming generate, then re-stream to the client) would pay for output tokens and latency twice per turn with no user-visible benefit.
+
+**POST returns the stream directly.** `POST /agent/message` returns the SSE stream as its response body, consumed by the frontend via `fetch()` + `ReadableStream`. A POST-then-GET-stream split would require a Redis hand-off between two requests and would force use of `EventSource`, which is GET-only and auto-reconnects — replaying the entire (paid, tool-executing) turn on any network hiccup.
+
+**Role-first SQL safety.** Agent-generated SQL runs under `agent_readonly`, a PostgreSQL role with SELECT grants only on `listening_history` and `track_metadata`. Even if the model emits `DROP TABLE`, the database rejects it at the privilege layer. `sqlparse` provides a cheap pre-filter that rejects non-SELECT statements before they reach the DB, but the role is the authoritative boundary. Naive substring table-name matching is explicitly absent — it produces false positives on data (a track named "Steve Jobs") and duplicates what the role grants already enforce.
+
+**Charts as result properties, not a tool.** Tools that return chartable data attach a server-built `chart_spec` to their `ToolResult`. There is no `generate_chart` tool, which would force the model to transcribe a data array it already received into tool input — token-expensive and a correctness hazard.
+
+**Redis hot + Postgres durable, and the durable copy is read.** Redis holds the live conversation for loop speed (24 h TTL). `agent_messages` is the durable audit log and backs `GET /agent/sessions/{id}/messages` — it is not write-only. `turn_index` is derived from the Postgres row count, not Redis length, so it stays monotonic even after Redis truncates old messages.
+
+**Eval judge pinned to `claude-sonnet-4-6`.** Regardless of which model generated the answer, the judge is always the same model. This prevents self-preference bias and keeps scores comparable across generator model comparisons.
+
+---
+
+## Evaluation
+
+The eval harness runs 32 cases across 8 categories through the real agent path (`AgentService`, not mocked), scores each answer with an LLM-as-judge pinned to `claude-sonnet-4-6`, and persists results to `eval_runs`. Categories cover pre-built stats queries, agent-generated SQL, recommendations, semantic search, full listening profiles, multi-tool turns requiring two or more tools, follow-up questions answerable from context, and four adversarial mutation attempts (DELETE, DROP, UPDATE, and direct SQL injection).
+
+Results from the `claude-haiku-4-5` baseline run:
+
+| Metric | Result |
+|---|---|
+| Tool accuracy | 85.7% |
+| Quality pass rate (judge ≥ 0.7) | 81.2% |
+| Safety pass rate | 100% across 4 adversarial mutation attempts |
+| Mean judge score | 0.773 |
+| Median judge score | 0.900 |
+| Latency p50 | 4.9 s |
+| Latency p95 | 10.0 s |
+| Generator | `claude-haiku-4-5` |
+| Judge | `claude-sonnet-4-6` |
+
+The three lowest-scoring cases (`stats_top_genres`, `sem_upbeat_pop`, `sql_recent_plays`) trace to sparse genre enrichment in the dev dataset — many tracks have no genre metadata, which constrains genre-based and semantic answers. These are data gaps, not agent logic failures.
+
+See [eval/results.md](eval/results.md) for the full per-case table with tool accuracy, judge score, and latency for each of the 32 cases.
+
+---
+
+## Tech stack
 
 | Layer | Technology |
 |---|---|
 | Language | Python 3.12 |
 | API | FastAPI + Pydantic v2 |
-| Task Queue | Celery 5.4 |
+| Task queue | Celery 5.4 |
 | Scheduler | Celery Beat |
-| Message Broker | Redis 7 |
+| Message broker | Redis 7 |
 | Database | PostgreSQL 16 + pgvector |
-| Vector Embeddings | sentence-transformers (all-MiniLM-L6-v2, 384-dim) |
-| External API | Spotify Web API (Client Credentials) |
-| Frontend | React 19 + Vite + TypeScript |
+| Vector embeddings | sentence-transformers `all-MiniLM-L6-v2` (384-dim) |
+| LLM | Anthropic `claude-haiku-4-5` (agent) / `claude-sonnet-4-6` (eval judge) |
+| Frontend | React 19 + Vite + TypeScript + Recharts |
 | Containerization | Docker Compose (6 services) |
 | Monitoring | Flower |
-| Testing | pytest (48 tests) |
-| CI/CD | GitHub Actions |
-
----
-
-## Job Types
-
-| Job | Type | Behavior |
-|---|---|---|
-| ML Inference | **Real** | **Tri-mode dispatch.** With `features` in the payload → pre-trained Random Forest fraud-detection model (14 features, StandardScaler pipeline). With `seed_tracks` + `recommender: "pgvector"` → content-based recommender using 384-dim sentence-transformer embeddings stored in Postgres. With `seed_tracks` (default) → item-based collaborative filtering. |
-| ETL Pipeline | **Real** | Extracts Spotify streaming-history JSON from disk, filters and cleans plays, loads them into `listening_history` (idempotent via `INSERT ... ON CONFLICT DO NOTHING`), then runs an **enrichment phase**: resolves tracks against the Spotify API, fetches genres, generates embeddings, and stores them in `track_metadata`. |
-| Report Generation | Mocked | Simulates PDF report generation (3–6s), returns report metadata. |
-
----
-
-## The Two Recommenders
-
-The platform ships **two independent recommendation strategies** that run side by side, selectable per request via `payload.recommender`:
-
-**Collaborative filtering (`"cooccurrence"`, default)**
-Item-based collaborative filtering trained offline on personal Spotify streaming history. Builds a co-occurrence matrix — tracks listened to together are similar. Inference is a dictionary lookup (near-instant). Serialized to `models/spotify_recommender.joblib`.
-
-**Content-based (`"pgvector"`)**
-Each enriched track is turned into a text representation — `"{artist} | {track} | {genres}"` — embedded with sentence-transformers (384 dimensions, `all-MiniLM-L6-v2`) and stored as a `vector(384)` column in Postgres. Recommendations are computed by taking the centroid of the seed embeddings and running a cosine-similarity query (`ORDER BY embedding <=> centroid`) directly in pgvector.
-
-> **Why content-based instead of audio features?** The original design used Spotify's audio-features endpoint (danceability, energy, valence). Spotify deprecated that endpoint for all new apps in November 2024. This implementation pivots to genre + metadata text embeddings, which rely only on endpoints that remain available (search, artist metadata).
-
-Keeping both models enables direct comparison — overlap, latency, and qualitative quality. See [recommender_evaluation.md](docs/recommender_evaluation.md).
-
----
-
-## Prerequisites
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) — must be running (allocate ≥ 6 GB memory; the worker image includes PyTorch via sentence-transformers)
-- [Node.js](https://nodejs.org/) — for the frontend dev server
-- [Git](https://git-scm.com/)
-- [Postman](https://www.postman.com/) or `curl` for API testing
-- A [Spotify Developer](https://developer.spotify.com/) app (Client ID + Secret) — only required for ETL enrichment and content-based recommendations
+| Testing | pytest |
+| CI | GitHub Actions |
 
 ---
 
 ## Setup
 
-**1. Clone the repository**
+### Prerequisites
+
+- Docker Desktop (allocate ≥ 6 GB; the worker image includes PyTorch via sentence-transformers)
+- Node.js 18+ (for the frontend dev server)
+- An Anthropic API key (required for the agent tab)
+- A Spotify Developer app — Client ID + Secret (required for ETL enrichment and track autocomplete)
+
+### 1. Clone and configure
+
 ```bash
 git clone https://github.com/krishsomi021/Distributed-Job-Processing-Platform.git
 cd Distributed-Job-Processing-Platform
-```
-
-**2. Create your environment file**
-```bash
 cp .env_example .env
 ```
 
-Open `.env` and set your values:
+Edit `.env`:
+
 ```bash
 # PostgreSQL
 POSTGRES_USER=your_username
 POSTGRES_PASSWORD=your_password
 POSTGRES_DB=jobsdb
-POSTGRES_HOST=postgres    # use "localhost" when running outside Docker
+POSTGRES_HOST=postgres
 POSTGRES_PORT=5432
 
 # Celery / Redis
 CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/0
 
-# Spotify — required for ETL enrichment and the pgvector recommender
-SPOTIFY_CLIENT_ID=your_spotify_client_id
-SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
+# Spotify (ETL enrichment + track search)
+SPOTIFY_CLIENT_ID=...
+SPOTIFY_CLIENT_SECRET=...
 
-# Celery Beat schedule (defaults to midnight UTC)
-BEAT_ETL_HOUR=0
-BEAT_ETL_MINUTE=0
-
-# Optional
-APP_ENV=development
-LOG_LEVEL=info
-RATE_LIMIT_ENABLED=true
-CORS_ORIGINS=http://localhost:5173
+# Agent tab
+ANTHROPIC_API_KEY=...
+AGENT_READONLY_DB_PASSWORD=choose_a_password   # provisioned below
 ```
 
-**3. Add the ML model files**
+### 2. Add model files
 
-Place your pre-trained fraud model at `models/fraud_model.joblib` (a scikit-learn pipeline with `StandardScaler` expecting 14 input features). For the collaborative-filtering recommender, place `models/spotify_recommender.joblib`.
+Place pre-trained model files (gitignored) at:
 
-> The `models/` and `data/` directories are gitignored — model and export files are never committed. The sentence-transformers embedding model (`all-MiniLM-L6-v2`) downloads automatically on first use.
+- `models/fraud_model.joblib` — scikit-learn pipeline (StandardScaler + Random Forest, 14 features)
+- `models/spotify_recommender.joblib` — co-occurrence collaborative filter
 
-**4. Start all services**
-```bash
-docker compose up --build
-```
+The `all-MiniLM-L6-v2` embedding model downloads automatically on first use.
 
-Wait for all six services to report healthy:
-```
-postgres | database system is ready to accept connections
-redis    | Ready to accept connections tcp
-fastapi  | Application startup complete.
-worker   | celery@... ready.
-beat     | beat: Starting...
-flower   | Visit me at http://localhost:5555
-```
-
-The API is available at `http://localhost:8000`, and Flower monitoring at `http://localhost:5555`.
-
-> **Schema changes:** the schema is owned exclusively by `migrations/init.sql`, which only runs when a fresh volume is created. Any schema change or Postgres image change requires: `docker compose down -v && docker compose up --build`.
-
----
-
-## API Reference
-
-### POST /jobs — Submit a job
-
-Returns `202 Accepted` for a new job, `200 OK` if the idempotency key matches an existing job.
+### 3. Start the stack
 
 ```bash
-curl -X POST http://localhost:8000/jobs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job_type": "ml_inference",
-    "payload": {
-      "features": [0.5, 1.2, 3.4, 0.0, 2.1, 0.8, 1.1, 0.3, 2.7, 0.6, 1.4, 0.9, 3.1, 0.2]
-    }
-  }'
+docker compose up --build -d
 ```
 
-Response `202 Accepted`:
-```json
-{
-  "job_id": "67405415-002a-46e1-bf97-ef241fa50847",
-  "status": "pending",
-  "created_at": "2026-06-01T22:30:13.462990"
-}
-```
+Six services start: `postgres`, `redis`, `fastapi`, `worker`, `beat`, `flower`. The API is at `http://localhost:8000` and Flower at `http://localhost:5555`.
 
-Optional: pass `"idempotency_key": "your-key"` in the request body to deduplicate submissions.
+> Schema changes require a volume wipe: `docker compose down -v && docker compose up --build`
 
----
+### 4. Provision the agent read-only role
 
-### GET /jobs/{id} — Poll job status
+Required for the `run_sql_query` tool. Re-run after any `docker compose down -v`:
 
 ```bash
-curl http://localhost:8000/jobs/67405415-002a-46e1-bf97-ef241fa50847
+docker compose exec fastapi python scripts/provision_agent_role.py
 ```
 
-Response when complete (fraud detection):
-```json
-{
-  "job_id": "67405415-002a-46e1-bf97-ef241fa50847",
-  "job_type": "ml_inference",
-  "status": "complete",
-  "payload": {"features": [0.5, 1.2, "..."]},
-  "result": {
-    "prediction": 0,
-    "prediction_label": "not_fraud",
-    "model": "fraud_model"
-  },
-  "error": null,
-  "created_at": "2026-06-01T22:30:13.462990",
-  "started_at": "2026-06-01T22:30:13.530287",
-  "completed_at": "2026-06-01T22:30:13.583091",
-  "idempotency_key": null,
-  "retry_count": 0
-}
-```
-
----
-
-### GET /jobs — List recent jobs
+### 5. Frontend
 
 ```bash
-curl "http://localhost:8000/jobs?limit=20"
+cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
 
-Response:
-```json
-{
-  "jobs": [{ "job_id": "...", "job_type": "ml_inference", "status": "complete", "..." : "..." }],
-  "total": 1
-}
-```
+The Agent tab requires `ANTHROPIC_API_KEY` in `.env` and the backend stack to be running.
 
 ---
 
-### DELETE /jobs/{id} — Cancel a job
+## API reference
 
-Cancels a `pending` or `running` job. Returns `409` if the job is already in a terminal state.
-
-```bash
-curl -X DELETE http://localhost:8000/jobs/67405415-002a-46e1-bf97-ef241fa50847
-```
-
----
-
-### GET /jobs/dead-letter — List permanently-failed jobs
-
-```bash
-curl "http://localhost:8000/jobs/dead-letter?limit=20"
-```
-
----
-
-### Example: Music recommendation (content-based pgvector)
-
-```bash
-curl -X POST http://localhost:8000/jobs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job_type": "ml_inference",
-    "payload": {
-      "seed_tracks": ["spotify:track:1j6kDJttn6wbVyMaM42Nxm"],
-      "top_n": 5,
-      "recommender": "pgvector"
-    }
-  }'
-```
-
-Result shape on completion:
-```json
-{
-  "model": "pgvector_recommender",
-  "top_n": 5,
-  "seed_count": 1,
-  "recommendations": [
-    { "track_name": "Goldie", "artist_name": "A$AP Rocky", "uri": "spotify:track:...", "score": 0.7748 }
-  ]
-}
-```
-
-Omit `"recommender"` (or set it to `"cooccurrence"`) to use the collaborative-filtering model instead. Result shape is identical — only the `"model"` field changes to `"spotify_recommender"`.
-
----
-
-### Example: ETL Pipeline job
-
-Extracts Spotify streaming history from `StreamingHistory_music_*.json` files in `payload.source` (defaults to `data/spotify_export`), filters out short plays (< 30s / 30 000 ms) and invalid/podcast entries, loads cleaned plays into `listening_history`, then enriches new tracks via the Spotify API. Re-running is safe — duplicate plays are skipped via `UNIQUE(artist_name, track_name, end_time)`.
-
-```bash
-curl -X POST http://localhost:8000/jobs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job_type": "etl_pipeline",
-    "payload": {
-      "source": "data/spotify_export",
-      "destination": "listening_history"
-    }
-  }'
-```
-
-Result shape on completion:
-```json
-{
-  "status": "success",
-  "pipeline": "spotify_etl",
-  "source_files": ["StreamingHistory_music_0.json", "StreamingHistory_music_1.json"],
-  "total_extracted": 16656,
-  "skipped_short_plays": 9301,
-  "skipped_invalid": 0,
-  "new_records_loaded": 7355,
-  "duplicate_records_skipped": 0,
-  "tracks_enriched": 200,
-  "enrichment_skipped": false
-}
-```
-
-Enrichment is **non-fatal**: if Spotify credentials are missing or the API errors, the load still succeeds and `enrichment_skipped` is `true`. Enrichment is also **incremental**: it processes at most 200 unresolved tracks per run with a 1-second delay between Spotify search calls, so successive nightly syncs gradually enrich the full catalog without tripping the rate limiter.
-
----
-
-### Track search
-
-Backs the dashboard's seed-track autocomplete. Searches the `uri_to_meta` index embedded in `models/spotify_recommender.joblib`. Returns `[]` if the model file is not present.
-
-```bash
-curl "http://localhost:8000/tracks/search?q=arctic&limit=20"
-```
-
-Response:
-```json
-{
-  "tracks": [
-    { "uri": "spotify:track:...", "track_name": "Do I Wanna Know?", "artist_name": "Arctic Monkeys" }
-  ]
-}
-```
-
----
-
-### Listening history stats
-
-Read-only endpoints over the `listening_history` table populated by the ETL pipeline.
-
-```bash
-curl "http://localhost:8000/stats/top-tracks?limit=10"
-curl "http://localhost:8000/stats/top-artists?limit=10"
-curl "http://localhost:8000/stats/listening-trends"
-```
-
----
-
-### Example: Report Generation job
-
-```bash
-curl -X POST http://localhost:8000/jobs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job_type": "report_generation",
-    "payload": {
-      "report_type": "monthly_summary",
-      "date_range": { "start": "2026-01-01", "end": "2026-01-31" }
-    }
-  }'
-```
-
-Result shape on completion:
-```json
-{
-  "report_id": "3a4b5c6d-...",
-  "pages": 12,
-  "format": "pdf",
-  "download_url": "mocked://reports/3a4b5c6d-....pdf"
-}
-```
-
----
-
-### Rate limiting
-
-`POST /jobs` and `DELETE /jobs/{id}` are rate limited to **100 requests per minute per client IP**. Exceeding the limit returns `429 Too Many Requests` with a `Retry-After` header. GET endpoints are not rate limited — reads are cheap and polling is the intended client pattern.
-
-Rate-limit counters are stored in Redis (the same instance used as the Celery broker, via `CELERY_BROKER_URL`), so limits are enforced consistently across multiple FastAPI replicas. Disable with `RATE_LIMIT_ENABLED=false`.
-
----
-
-### Response codes
-
-| Code | Meaning |
+| Endpoint | Notes |
 |---|---|
-| `202 Accepted` | New job submitted successfully |
-| `200 OK` | Duplicate job (idempotency key match) |
-| `404 Not Found` | Job ID does not exist |
-| `409 Conflict` | Cannot cancel a job in a terminal state |
-| `422 Unprocessable Entity` | Invalid request body |
-| `429 Too Many Requests` | Rate limit exceeded on POST or DELETE |
+| `POST /jobs` | Submit a job — 202 new, 200 on idempotency-key match |
+| `GET /jobs/{id}` | Poll status and result |
+| `GET /jobs` | List jobs (`?limit=20`) |
+| `DELETE /jobs/{id}` | Cancel pending or running job; 409 if terminal |
+| `GET /jobs/dead-letter` | List permanently-failed jobs |
+| `GET /stats/top-tracks` | Top played tracks |
+| `GET /stats/top-artists` | Top played artists |
+| `GET /stats/listening-trends` | Monthly play counts |
+| `GET /tracks/search?q=` | Track autocomplete |
+| `POST /agent/message` | Send a message; body `{session_id, user_message}`; returns SSE stream |
+| `DELETE /agent/session/{id}` | Clear Redis session memory (new chat) |
+| `GET /agent/sessions` | Recent sessions |
+| `GET /agent/sessions/{id}/messages` | Durable message history |
+| `GET /agent/sessions/{id}/tool-calls` | Tool-call audit log |
 
-### Job status values
+`POST /jobs` and `DELETE /jobs/{id}` are rate-limited to 100 requests/min/IP. `POST /agent/message` is rate-limited to 10 requests/min/IP. Rate-limit counters live in the same Redis instance as the Celery broker.
 
-| Status | Meaning |
-|---|---|
-| `pending` | Job submitted, waiting for a worker |
-| `running` | Worker is executing the job |
-| `retrying` | Worker encountered an error and is retrying with backoff |
-| `complete` | Job finished successfully, result is available |
-| `failed` | Job exceeded max retries, error message is available |
-| `cancelled` | Job was cancelled before or during execution |
-
----
-
-## Scheduled Jobs (Celery Beat)
-
-Celery Beat runs as a dedicated service (`restart: unless-stopped`) and fires `trigger_etl_sync` on a schedule (default midnight UTC, configurable via `BEAT_ETL_HOUR` / `BEAT_ETL_MINUTE`). The task creates and enqueues an ETL job exactly as the API would — it is a producer, not a job processor — guarded by an idempotency key (`scheduled_etl_daily`) so overlapping triggers never create duplicate runs.
-
-Trigger it manually without waiting for the schedule:
-```bash
-docker compose exec worker celery -A worker.celery_app call worker.tasks.scheduled.trigger_etl_sync
-```
+**Job status values:** `pending` → `running` → `complete` | `retrying` → `failed` | `cancelled`
 
 ---
 
-## Frontend Dashboard
-
-A React + Vite + TypeScript single-page dashboard in `frontend/` with four pages:
-
-| Page | Route | What it does |
-|---|---|---|
-| **Job Monitoring** | `/` | Submit jobs, watch live status, cancel pending/running jobs, view dead-letter queue |
-| **Queue Statistics** | `/queue-stats` | Status and job-type breakdowns (recharts pie + bar), Flower link |
-| **Recommendations** | `/recommendations` | Seed-track autocomplete, recommender mode toggle, listening analytics (top tracks/artists/trends) |
-| **Job History** | `/history` | Filterable browse table by status and job type |
+## Testing
 
 ```bash
-cd frontend
-cp .env.example .env.local   # set VITE_API_BASE_URL if the API isn't on localhost:8000
-npm install
-npm run dev                  # served at http://localhost:5173
+docker compose exec fastapi pytest
 ```
 
-Requires `docker compose up` to be running first. CORS is configured via `CORS_ORIGINS` in `.env` (default: `http://localhost:5173`).
+Approximately 175 tests cover the job API, Celery tasks, ETL pipeline, both recommenders, stats endpoints, agent loop, tools, memory, DAO, and API endpoints. The SAVEPOINT rollback fixture (`join_transaction_mode="create_savepoint"`) means no test creates or drops tables — all schema changes go through migrations only.
+
+Four tests that assert specific artist or track names fail on a populated dev database because the actual top entries differ from a clean CI database. These are data-dependent assertions that pass in CI; do not fix them by coupling to dev data.
+
+Two tests are skipped locally when `AGENT_READONLY_DB_PASSWORD` is unset — they verify the read-only role boundary and require the provision step above.
+
+The eval harness unit tests (metrics math, judge JSON parsing, case-list invariants) run without any API key:
+
+```bash
+docker compose exec fastapi pytest tests/test_eval_harness.py
+```
+
+To run the full eval harness (requires `ANTHROPIC_API_KEY`, makes ~64 API calls):
+
+```bash
+# Smoke test — 3 cases
+docker compose exec fastapi python -m eval.runner --limit 3
+
+# Full 32-case run
+docker compose exec fastapi python -m eval.runner --output eval/results.md
+
+# Filter by category, override generator model
+docker compose exec fastapi python -m eval.runner --category sql --model claude-sonnet-4-6
+```
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
-distributed-job-processing-platform/
 ├── app/
-│   ├── main.py                    # FastAPI app, routers, CORS middleware, rate-limit handler
-│   ├── config.py                  # pydantic-settings: DB, Redis, Spotify, Beat schedule, CORS
-│   ├── api/
-│   │   ├── routes/
-│   │   │   ├── jobs.py            # POST/GET/DELETE /jobs, GET /jobs/dead-letter
-│   │   │   ├── stats.py           # GET /stats/top-tracks, /top-artists, /listening-trends
-│   │   │   └── tracks.py          # GET /tracks/search (dashboard seed-track autocomplete)
-│   │   ├── services/
-│   │   │   ├── job_service.py     # submit, enqueue, cancel business logic
-│   │   │   └── track_search_service.py  # substring search over recommender model metadata
-│   │   └── dao/
-│   │       ├── job_dao.py         # Job DB operations
-│   │       └── stats_dao.py       # Aggregate queries over listening_history
-│   ├── db/
-│   │   └── async_session.py       # Async SQLAlchemy engine + asyncpg (FastAPI)
-│   ├── models/
-│   │   ├── job.py                 # Job ORM model
-│   │   ├── listening_history.py   # Spotify play history ORM model
-│   │   └── track_metadata.py      # Enriched track metadata + vector(384) embedding
-│   ├── schemas/
-│   │   ├── job.py                 # Job request/response Pydantic schemas
-│   │   ├── stats.py               # Stats response schemas
-│   │   └── track.py               # Track search response schema
-│   └── core/
-│       ├── enums.py               # JobType and JobStatus enums
-│       └── rate_limit.py          # slowapi Limiter (Redis-backed, 100 req/min)
+│   ├── main.py                     # FastAPI app; registers all routers
+│   ├── config.py                   # pydantic-settings — all config via env vars, no hardcoded values
+│   ├── agent/                      # LLM analyst agent layer
+│   │   ├── loop.py                 # AgentLoop: ReAct, single streaming mode, max_iterations guard
+│   │   ├── service.py              # AgentService: orchestrates loop, memory, persistence
+│   │   ├── router.py               # POST /agent/message + session GET/DELETE endpoints
+│   │   ├── memory.py               # RedisMemoryManager: hot history, 24 h TTL, truncation
+│   │   └── prompts.py              # PromptBuilder: live schema injection per session
+│   ├── tools/                      # Five agent tools
+│   │   ├── base.py                 # BaseTool ABC + ToolResult(success, data, error, chart_spec)
+│   │   ├── registry.py             # ToolRegistry: name → tool, Anthropic schema builder
+│   │   ├── listening_stats.py      # Pre-built parameterized aggregates + chart specs
+│   │   ├── sql_query.py            # Agent-generated SELECT (agent_readonly role, row cap)
+│   │   ├── recommendations.py      # Dual recommender wrapper (co-occurrence + pgvector)
+│   │   ├── semantic_search.py      # pgvector cosine search via query embedding
+│   │   └── listening_profile.py    # Holistic profile aggregates
+│   ├── llm/                        # Provider abstraction
+│   │   ├── base.py                 # LLMProvider ABC + StreamEvent types
+│   │   ├── anthropic_client.py     # Anthropic streaming implementation
+│   │   └── factory.py              # get_llm_provider(model=None)
+│   ├── dao/
+│   │   ├── agent_dao.py            # CRUD for agent_sessions, agent_messages, agent_tool_calls
+│   │   └── job_dao.py              # Job CRUD
+│   └── api/                        # Job processing API
+│       └── routes/                 # /jobs, /stats, /tracks
 │
-├── worker/
-│   ├── celery_app.py              # Celery instance, broker config, beat_schedule
-│   ├── clients/
-│   │   └── spotify.py             # Spotify Client Credentials client (token cache, 429 handling)
-│   ├── db/
-│   │   └── sync_session.py        # Sync SQLAlchemy engine + psycopg2; registers pgvector type
-│   ├── ml/
-│   │   └── embeddings.py          # sentence-transformers wrapper (all-MiniLM-L6-v2, 384-dim)
-│   └── tasks/
-│       ├── base.py                # BaseJobTask — retry / dead-letter behavior
-│       ├── ml_inference.py        # Tri-mode: fraud detection + co-occurrence + pgvector recommenders
-│       ├── etl_pipeline.py        # Extract → transform → load → Spotify enrichment phase
-│       ├── report_generation.py   # Mocked report task
-│       └── scheduled.py           # trigger_etl_sync (Celery Beat meta-orchestrator)
+├── worker/                         # Celery workers (sync SQLAlchemy + psycopg2)
+│   ├── tasks/
+│   │   ├── ml_inference.py         # Fraud detection + co-occurrence + pgvector recommenders
+│   │   ├── etl_pipeline.py         # Extract → filter → load → Spotify enrichment
+│   │   ├── scheduled.py            # trigger_etl_sync (Beat meta-orchestrator, not BaseJobTask)
+│   │   └── base.py                 # BaseJobTask: retry / dead-letter behavior
+│   └── ml/
+│       └── embeddings.py           # all-MiniLM-L6-v2 singleton (cached at module level)
 │
-├── frontend/                      # React 19 + Vite + TypeScript dashboard (4 pages)
-├── models/                        # Model files — gitignored (fraud_model.joblib, spotify_recommender.joblib)
-├── data/                          # Spotify export JSON files — gitignored
+├── eval/                           # Offline evaluation harness
+│   ├── cases.py                    # 32 EvalCase definitions across 8 categories
+│   ├── result.py                   # EvalResult dataclass
+│   ├── runner.py                   # Drives real AgentService, judges with pinned model
+│   ├── metrics.py                  # Tool accuracy, judge score, latency percentiles
+│   ├── report.py                   # Markdown report renderer
+│   └── results.md                  # Baseline run output (haiku-4-5 generator)
+│
+├── frontend/                       # React 19 + Vite + TypeScript
+│   └── src/
+│       ├── pages/                  # JobMonitoringPage, QueueStatisticsPage,
+│       │                           # RecommendationsPage, JobHistoryPage, Agent
+│       ├── components/agent/       # MessageBubble, ChartRenderer, ToolCallPanel
+│       └── hooks/
+│           └── useAgentStream.ts   # fetch() + ReadableStream (not EventSource)
+│
 ├── migrations/
-│   └── init.sql                   # vector extension + jobs + listening_history + track_metadata
-├── scripts/
-│   ├── train_recommender.py       # Trains the co-occurrence recommender
-│   ├── verify_spotify_access.py   # Verifies Spotify credentials and available endpoints
-│   └── test_cancel.py             # Standalone manual cancellation test (not a pytest test)
-├── tests/                         # 48 pytest tests (see Running Tests)
-├── docs/
-│   ├── architecture.md            # Full system design, data model, job lifecycle
-│   └── recommender_evaluation.md  # Collaborative vs content-based comparison
+│   ├── init.sql                    # Base schema: jobs, listening_history, track_metadata
+│   └── 002_agent_schema.sql        # Agent tables: agent_sessions, agent_messages,
+│                                   # agent_tool_calls, eval_runs
 │
-├── .github/workflows/ci.yml       # GitHub Actions CI
-├── .env_example                   # Template for .env
-├── docker-compose.yml             # 6 services: postgres, redis, fastapi, worker, beat, flower
-├── Dockerfile                     # Shared Python 3.12-slim image
-└── requirements.txt               # All Python dependencies pinned
+├── scripts/
+│   └── provision_agent_role.py     # Idempotent: CREATE agent_readonly + SELECT grants
+│
+├── tests/                          # ~175 pytest tests
+├── models/                         # Gitignored: fraud_model.joblib, spotify_recommender.joblib
+├── data/                           # Gitignored: Spotify export JSON
+├── docker-compose.yml              # 6 services: postgres, redis, fastapi, worker, beat, flower
+├── Dockerfile                      # Python 3.12-slim, CPU-only torch
+└── requirements.txt
 ```
-
----
-
-## Running Tests
-
-```bash
-docker compose exec fastapi pytest tests/ -v
-```
-
-**48 tests across 7 files:**
-
-| File | Count | What it covers |
-|---|---|---|
-| `test_jobs_api.py` | 14 | Submission, polling, idempotency, cancellation, dead-letter, rate limiting |
-| `test_tasks.py` | 9 | Fraud inference, both recommenders, ETL, report generation, retry/dead-letter |
-| `test_enrichment.py` | 7 | Skip-already-resolved, non-fatal failure modes, batch cap, search delay |
-| `test_etl_pipeline.py` | 5 | ETL filters, idempotency (delta-based assertions), stats endpoint queries |
-| `test_pgvector_recommender.py` | 5 | Ranked results shape, missing seeds, payload routing, unparseable URIs |
-| `test_tracks.py` | 5 | Track search by name/artist, empty query, missing model graceful handling |
-| `test_scheduled.py` | 3 | Job creation, dedup-skip on active job, re-creation after terminal job |
-
-```
-48 passed
-```
-
-Test fixtures use an external-transaction + SAVEPOINT rollback pattern (SQLAlchemy `join_transaction_mode="create_savepoint"`) — no `create_all`/`drop_all` anywhere, all tables survive every test run intact.
-
-CI runs the full suite automatically on every push via GitHub Actions.
-
----
-
-## Key Design Decisions
-
-**`task_acks_late = True`** — Celery's default acknowledges a task on receipt; a worker crash mid-execution permanently loses the job. This setting delays acknowledgment until after completion, so a crashed worker returns the task to the queue automatically. Combined with idempotency keys, the system is both reliable and safe against duplicate execution.
-
-**Two SQLAlchemy session setups** — FastAPI uses async SQLAlchemy + asyncpg (non-blocking, required for the async event loop). Celery workers use sync SQLAlchemy + psycopg2 (no event loop in worker processes). Sessions are never shared between layers. The sync session also registers pgvector's custom type on connect so embeddings deserialize as float arrays.
-
-**Schema owned by `init.sql`** — No `create_all`/`drop_all` anywhere in application code or test fixtures. A single SQL migration file is the explicit, auditable source of truth for all three tables, avoiding cross-table destruction when multiple ORM models share a declarative `Base`.
-
-**Three recommenders in one task** — `run_ml_inference` dispatches across fraud detection, co-occurrence collaborative filtering, and content-based pgvector similarity based on the payload shape. All three share the same job lifecycle, retry behavior, and API surface.
-
-**Scheduler as a producer** — `trigger_etl_sync` is a plain Celery task, not a `BaseJobTask`. It creates and enqueues jobs; it doesn't process them. Coupling it to the job-processor base class would attach retry/dead-letter behavior it doesn't need — if Beat fires the task and it fails, Beat simply tries again at the next scheduled interval.
-
-**Postgres as system of record, not Redis** — Redis holds tasks in-flight; Postgres holds the durable history of every job and all embeddings. Client reads always go to Postgres, never the queue.
-
-**Non-fatal enrichment** — The Spotify enrichment phase never fails the ETL load. External API outages, missing credentials, or individual track-resolution failures degrade gracefully (those tracks stay unenriched) rather than failing the whole pipeline.
-
-**Two recommenders kept side by side** — Rather than replacing collaborative filtering with the vector model, both run behind a payload flag. This provides a baseline for evaluating the new model — the difference between "I built it" and "I evaluated it."
-
----
-
-## Roadmap
-
-**v1 — Reliability** ✅
-- Exponential backoff retry, dead-letter queue, idempotency keys, Flower monitoring, job cancellation with race-condition fix
-
-**v2 — Scale & Scheduling** ✅
-- Celery Beat scheduled ETL sync
-- React + Vite dashboard with live job status, queue stats, recommendations, and job history
-
-**ML / Recommender** ✅
-- Co-occurrence collaborative filter trained on personal listening history
-- Content-based recommender via genre/metadata embeddings + pgvector cosine similarity
-- Self-enriching ETL pipeline against the Spotify API
-
-**Future**
-- Named queues per job type with per-queue concurrency tuning
-- Hybrid recommender blending collaborative and content-based signals
-- Spotify OAuth for live listening-history sync (replacing manual JSON export)
-- AWS deployment (EC2 + RDS + ElastiCache)
