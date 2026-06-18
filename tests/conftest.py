@@ -76,6 +76,23 @@ def clean_scheduled_jobs(sync_db_session):
 
 
 @pytest_asyncio.fixture
+async def clean_spotify_tokens(db_session: AsyncSession):
+    """Delete all spotify_oauth_tokens rows within the current SAVEPOINT, for
+    deterministic single-row-table assertions. Restored on rollback."""
+    await db_session.execute(text("DELETE FROM spotify_oauth_tokens"))
+    await db_session.flush()
+    yield
+
+
+@pytest.fixture
+def clean_scheduled_spotify_tokens(sync_db_session):
+    """Sync counterpart of clean_spotify_tokens for worker-layer polling tests."""
+    sync_db_session.execute(text("DELETE FROM spotify_oauth_tokens"))
+    sync_db_session.flush()
+    yield
+
+
+@pytest_asyncio.fixture
 async def client(db_session: AsyncSession):
     async def override_get_db():
         yield db_session

@@ -11,6 +11,7 @@ from app.api.routes.stats import router as stats_router
 from app.api.routes.tracks import router as tracks_router
 from app.config import settings
 from app.core.rate_limit import limiter
+from app.spotify.router import router as spotify_router
 
 logging.basicConfig(level=settings.log_level.upper())
 
@@ -28,3 +29,4 @@ app.include_router(agent_router)
 app.include_router(jobs_router)
 app.include_router(stats_router)
 app.include_router(tracks_router)
+app.include_router(spotify_router)
