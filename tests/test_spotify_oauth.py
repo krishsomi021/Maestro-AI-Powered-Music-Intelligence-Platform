@@ -8,6 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from app.config import settings
 
 
 # ---------------------------------------------------------------------------
@@ -238,11 +241,181 @@ class TestRunRecentlyPlayedPoll:
 # GET /spotify/auth — redirect
 # ---------------------------------------------------------------------------
 
+_has_oauth_admin_pw = bool(settings.oauth_admin_password)
+_skip_no_oauth_admin = pytest.mark.skipif(
+    not _has_oauth_admin_pw,
+    reason="OAUTH_ADMIN_PASSWORD not set — skipping Basic Auth integration test",
+)
+
+
 class TestSpotifyAuthRedirect:
+    @_skip_no_oauth_admin
     @pytest.mark.asyncio
     async def test_auth_redirects_to_spotify_domain(self, client):
-        response = await client.get("/spotify/auth", follow_redirects=False)
+        response = await client.get(
+            "/spotify/auth",
+            follow_redirects=False,
+            auth=(settings.oauth_admin_user, settings.oauth_admin_password),
+        )
 
         assert response.status_code == 307
         assert "accounts.spotify.com" in response.headers["location"]
         assert "user-read-recently-played" in response.headers["location"]
+        assert "state=" in response.headers["location"]
+
+
+# ---------------------------------------------------------------------------
+# spotify_oauth_tokens is unreachable via the agent_readonly role
+# ---------------------------------------------------------------------------
+
+_has_readonly_pw = bool(settings.agent_readonly_db_password)
+_skip_readonly = pytest.mark.skipif(
+    not _has_readonly_pw,
+    reason="AGENT_READONLY_DB_PASSWORD not set — skipping agent_readonly role boundary test",
+)
+
+
+@_skip_readonly
+class TestSpotifyTokensRoleBoundary:
+    """
+    Verify the agent_readonly role -- the same role the agent's run_sql_query
+    tool connects through -- cannot read spotify_oauth_tokens.
+    Requires: scripts/provision_agent_role.py run against the target DB.
+    """
+
+    @pytest.mark.asyncio
+    async def test_readonly_role_rejects_select_on_oauth_tokens(self):
+        url = (
+            f"postgresql+asyncpg://{settings.agent_readonly_db_user}"
+            f":{settings.agent_readonly_db_password}"
+            f"@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"
+        )
+        engine = create_async_engine(url)
+        try:
+            async with engine.connect() as conn:
+                with pytest.raises(Exception, match="permission denied"):
+                    await conn.execute(text("SELECT * FROM spotify_oauth_tokens LIMIT 1"))
+        finally:
+            await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# CSRF state — generate/consume, real Redis
+# ---------------------------------------------------------------------------
+
+class TestOAuthState:
+    @pytest.mark.asyncio
+    async def test_state_is_single_use(self):
+        from app.spotify.oauth import consume_oauth_state, generate_oauth_state
+
+        state = await generate_oauth_state()
+        assert await consume_oauth_state(state) is True
+        assert await consume_oauth_state(state) is False
+
+    @pytest.mark.asyncio
+    async def test_unknown_state_rejected(self):
+        from app.spotify.oauth import consume_oauth_state
+
+        assert await consume_oauth_state("not-a-real-state-token") is False
+
+
+# ---------------------------------------------------------------------------
+# GET /spotify/callback — state enforcement, no Basic Auth required
+# ---------------------------------------------------------------------------
+
+class TestSpotifyCallbackState:
+    @pytest.mark.asyncio
+    async def test_missing_state_rejected(self, client):
+        response = await client.get("/spotify/callback", params={"code": "some-code"})
+        assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_unknown_state_rejected(self, client):
+        response = await client.get(
+            "/spotify/callback", params={"code": "some-code", "state": "bogus"}
+        )
+        assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_valid_state_accepted_and_consumed_once(self, client, clean_spotify_tokens):
+        from app.spotify.oauth import generate_oauth_state
+
+        state = await generate_oauth_state()
+        tokens = {
+            "access_token": "a1",
+            "refresh_token": "r1",
+            "expires_at": datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1),
+        }
+
+        with patch(
+            "app.spotify.router.exchange_code_for_tokens", new=AsyncMock(return_value=tokens)
+        ), patch("app.spotify.router.store_tokens", new=AsyncMock()):
+            response = await client.get(
+                "/spotify/callback", params={"code": "some-code", "state": state}
+            )
+        assert response.status_code == 200
+
+        # Second attempt with the same (now-consumed) state must fail.
+        with patch(
+            "app.spotify.router.exchange_code_for_tokens", new=AsyncMock(return_value=tokens)
+        ), patch("app.spotify.router.store_tokens", new=AsyncMock()):
+            replay = await client.get(
+                "/spotify/callback", params={"code": "some-code", "state": state}
+            )
+        assert replay.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# GET /spotify/auth — HTTP Basic Auth (auth only -- callback is not gated)
+# ---------------------------------------------------------------------------
+
+@_skip_no_oauth_admin
+class TestSpotifyBasicAuth:
+    @pytest.mark.asyncio
+    async def test_auth_rejects_missing_credentials(self, client):
+        response = await client.get("/spotify/auth", follow_redirects=False)
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_auth_rejects_wrong_credentials(self, client):
+        response = await client.get(
+            "/spotify/auth", follow_redirects=False, auth=("wrong", "wrong")
+        )
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_auth_accepts_correct_credentials(self, client):
+        response = await client.get(
+            "/spotify/auth",
+            follow_redirects=False,
+            auth=(settings.oauth_admin_user, settings.oauth_admin_password),
+        )
+        assert response.status_code == 307
+
+
+# ---------------------------------------------------------------------------
+# GET /spotify/auth — rate limit (same pattern as test_jobs_api.py)
+# ---------------------------------------------------------------------------
+
+class TestSpotifyRateLimit:
+    @pytest.mark.asyncio
+    async def test_rate_limit_exceeded_returns_429(self, client):
+        from app.core.rate_limit import limiter
+        from slowapi.errors import RateLimitExceeded
+
+        mock_limit = MagicMock(error_message="5 per 1 minute")
+
+        def _fake_check_request_limit(request, endpoint_func, in_middleware=True):
+            request.state.view_rate_limit = None
+            raise RateLimitExceeded(mock_limit)
+
+        with patch.object(limiter, "enabled", True), patch.object(
+            limiter, "_check_request_limit", _fake_check_request_limit
+        ):
+            response = await client.get(
+                "/spotify/auth",
+                follow_redirects=False,
+                auth=(settings.oauth_admin_user, settings.oauth_admin_password),
+            )
+
+        assert response.status_code == 429

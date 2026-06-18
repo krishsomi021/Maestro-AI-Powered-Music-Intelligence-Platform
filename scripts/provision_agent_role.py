@@ -13,9 +13,15 @@ Grants applied:
     SELECT   on listening_history
     SELECT   on track_metadata
 
+Explicit REVOKE applied (defense-in-depth, idempotent no-op if no grant existed):
+    REVOKE ALL on spotify_oauth_tokens
+
 Deliberately NO grant on: jobs, agent_sessions, agent_messages,
-agent_tool_calls, eval_runs — the agent reads those through the
-trusted admin connection, not through the read-only role.
+agent_tool_calls, eval_runs, spotify_oauth_tokens — the agent reads those
+through the trusted admin connection, not through the read-only role.
+spotify_oauth_tokens holds live Spotify access/refresh tokens and must never
+be reachable by the agent's run_sql_query tool, so its REVOKE is explicit
+rather than relying on the absence of a grant.
 """
 
 import asyncio
@@ -73,12 +79,30 @@ async def provision() -> None:
             f'GRANT SELECT ON listening_history, track_metadata TO "{role}";'
         )
 
+        # spotify_oauth_tokens may not exist yet (e.g. fresh clone, or a
+        # `down -v` not yet followed by `up -d` to apply migration 003) --
+        # check before revoking so this script stays safe to run at any point.
+        table_exists = await conn.fetchval(
+            """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = 'spotify_oauth_tokens'
+            """
+        )
+        if table_exists:
+            await conn.execute(f'REVOKE ALL ON spotify_oauth_tokens FROM "{role}";')
+            print(f"[provision] REVOKE ALL on spotify_oauth_tokens from '{role}': done")
+        else:
+            print(
+                "[provision] spotify_oauth_tokens not found — skipping REVOKE "
+                "(migration 003 not yet applied)"
+            )
+
         print(f"[provision] Role '{role}' provisioned successfully.")
         print(f"[provision] Grants:")
         print(f"            CONNECT on database '{db}'")
         print(f"            USAGE on schema public")
         print(f"            SELECT on listening_history, track_metadata")
-        print(f"[provision] No grant on: jobs, agent_*, eval_runs (by design).")
+        print(f"[provision] No grant on: jobs, agent_*, eval_runs, spotify_oauth_tokens (by design).")
 
     finally:
         await conn.close()

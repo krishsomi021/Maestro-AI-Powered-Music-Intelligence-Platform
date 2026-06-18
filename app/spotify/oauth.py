@@ -10,10 +10,12 @@ _parse_token_response is shared (imported) by app/spotify/polling.py, which perf
 the sync-side token refresh from inside the Celery Beat task.
 """
 
+import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import httpx
+import redis.asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,16 +26,43 @@ _TOKEN_URL = "https://accounts.spotify.com/api/token"
 _SCOPE = "user-read-recently-played"
 _TOKEN_SAFETY_MARGIN_SECONDS = 60  # matches worker/clients/spotify.py's convention
 
+_OAUTH_STATE_TTL_SECONDS = 300
+_OAUTH_STATE_KEY_PREFIX = "spotify:oauth_state:"
 
-def build_authorize_url() -> str:
+
+def build_authorize_url(state: str) -> str:
     """Returns the full Spotify authorize URL for a 307 redirect."""
     params = {
         "client_id": settings.spotify_client_id,
         "response_type": "code",
         "redirect_uri": settings.spotify_redirect_uri,
         "scope": _SCOPE,
+        "state": state,
     }
     return f"{_AUTHORIZE_URL}?{urlencode(params)}"
+
+
+async def generate_oauth_state() -> str:
+    """Mints a single-use CSRF state token and stores it in Redis with a 5-minute
+    TTL -- same Redis connection pattern as app/agent/memory.py::RedisMemoryManager."""
+    state = secrets.token_urlsafe(32)
+    redis_client = redis.asyncio.from_url(settings.celery_broker_url, decode_responses=True)
+    try:
+        await redis_client.setex(_OAUTH_STATE_KEY_PREFIX + state, _OAUTH_STATE_TTL_SECONDS, "1")
+    finally:
+        await redis_client.aclose()
+    return state
+
+
+async def consume_oauth_state(state: str) -> bool:
+    """Atomically checks and deletes the state key so it can only be used once --
+    avoids the race window a separate GET-then-DELETE would have."""
+    redis_client = redis.asyncio.from_url(settings.celery_broker_url, decode_responses=True)
+    try:
+        deleted = await redis_client.delete(_OAUTH_STATE_KEY_PREFIX + state)
+    finally:
+        await redis_client.aclose()
+    return deleted > 0
 
 
 def _parse_token_response(data: dict, fallback_refresh_token: str) -> dict:

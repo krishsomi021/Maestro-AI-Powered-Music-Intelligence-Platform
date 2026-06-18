@@ -24,7 +24,11 @@ class Settings(BaseSettings):
 
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
-    spotify_redirect_uri: str = "http://localhost:8000/spotify/callback"
+    spotify_redirect_uri: str = "http://127.0.0.1:8000/spotify/callback"
+
+    # Spotify OAuth endpoint Basic Auth (gates who can initiate /spotify/auth)
+    oauth_admin_user: str = ""
+    oauth_admin_password: str = ""
 
     # LLM / Agent
     anthropic_api_key: str = ""
