@@ -54,3 +54,22 @@ def trigger_etl_sync() -> None:
         logger.info("scheduled ETL job %s created and enqueued", job.id)
     finally:
         db.close()
+
+
+@celery_app.task(name="worker.tasks.scheduled.poll_recently_played")
+def poll_recently_played() -> None:
+    """Meta-task, not a BaseJobTask -- same shape as trigger_etl_sync: it does the
+    sync work directly rather than enqueueing a Job, so the job-tracking base class
+    doesn't apply. See app.spotify.polling.run_recently_played_poll for the guard
+    (skips if Spotify hasn't been authorized yet) and the upsert idempotency."""
+    from app.spotify.polling import run_recently_played_poll
+
+    db = get_sync_db()
+    try:
+        result = run_recently_played_poll(db)
+        if result["skipped"]:
+            logger.info("Spotify poll skipped: %s", result["skipped"])
+        else:
+            logger.info("Spotify poll complete: %d new plays inserted", result["new_plays"])
+    finally:
+        db.close()

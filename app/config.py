@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
+    spotify_redirect_uri: str = "http://localhost:8000/spotify/callback"
 
     # LLM / Agent
     anthropic_api_key: str = ""

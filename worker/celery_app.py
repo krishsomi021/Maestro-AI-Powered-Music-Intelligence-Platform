@@ -33,5 +33,9 @@ celery_app.conf.update(
             "task": "worker.tasks.scheduled.trigger_etl_sync",
             "schedule": crontab(hour=settings.beat_etl_hour, minute=settings.beat_etl_minute),
         },
+        "poll-spotify-recently-played-hourly": {
+            "task": "worker.tasks.scheduled.poll_recently_played",
+            "schedule": crontab(minute=0),
+        },
     },
 )
