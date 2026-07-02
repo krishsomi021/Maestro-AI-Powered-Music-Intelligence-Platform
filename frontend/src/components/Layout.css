@@ -17,6 +17,7 @@
 .layout__title {
   font-size: 18px;
   font-weight: 700;
+  color: var(--color-accent);
 }
 
 .layout__main {

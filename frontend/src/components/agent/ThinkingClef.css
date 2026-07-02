@@ -1,0 +1,44 @@
+.thinking-clef {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.thinking-clef__svg {
+  width: 28px;
+  height: 28px;
+}
+
+.thinking-clef__ghost {
+  fill: var(--color-accent);
+  opacity: 0.15;
+}
+
+.thinking-clef__fill {
+  fill: var(--color-accent);
+}
+
+.thinking-clef__clip-rect {
+  transform-origin: 0px 512px;
+  transform: scaleY(0);
+  animation: thinking-clef-rise 1.8s ease-in-out infinite;
+}
+
+@keyframes thinking-clef-rise {
+  0% {
+    transform: scaleY(0);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+  100% {
+    transform: scaleY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-clef__clip-rect {
+    animation: none;
+    transform: scaleY(0.6);
+  }
+}

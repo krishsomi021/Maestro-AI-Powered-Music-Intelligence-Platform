@@ -68,9 +68,15 @@ export function AgentPage() {
           </div>
         )}
 
-        {messages.map((msg, i) => (
-          <MessageBubble key={i} message={msg} />
-        ))}
+        {messages.map((msg, i) => {
+          const isThinking =
+            isStreaming &&
+            i === messages.length - 1 &&
+            msg.role === 'assistant' &&
+            msg.content === '' &&
+            msg.tool_calls.length === 0;
+          return <MessageBubble key={i} message={msg} isThinking={isThinking} />;
+        })}
 
         {/* Scroll anchor — kept at the bottom of the list */}
         <div ref={messagesEndRef} />

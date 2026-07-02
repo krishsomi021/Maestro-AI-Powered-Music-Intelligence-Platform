@@ -63,17 +63,17 @@ details[open] .tool-panel__summary::before {
 }
 
 .tool-panel__badge--running {
-  background: #fff3cd;
+  background: rgba(251, 191, 36, 0.14);
   color: var(--color-warning);
 }
 
 .tool-panel__badge--done {
-  background: #d4edda;
+  background: rgba(74, 222, 128, 0.14);
   color: var(--color-success);
 }
 
 .tool-panel__badge--error {
-  background: #f8d7da;
+  background: rgba(255, 138, 138, 0.14);
   color: var(--color-error);
 }
 

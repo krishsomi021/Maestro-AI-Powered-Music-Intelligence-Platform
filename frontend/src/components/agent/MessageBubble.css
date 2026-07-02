@@ -21,7 +21,7 @@
 
 .message-bubble--user .message-bubble__body {
   background: var(--color-accent);
-  color: #ffffff;
+  color: var(--color-accent-on);
   border-bottom-right-radius: 4px;
 }
 

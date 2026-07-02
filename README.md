@@ -324,3 +324,9 @@ docker compose exec fastapi python -m eval.runner --category sql --model claude-
 ├── Dockerfile                      # Python 3.12-slim, CPU-only torch
 └── requirements.txt
 ```
+
+---
+
+## Credits
+
+- Treble clef icon by [Delapouite](https://delapouite.com/) via [game-icons.net](https://game-icons.net/1x1/delapouite/g-clef.html), licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) — used for the agent's "thinking" loading animation.
