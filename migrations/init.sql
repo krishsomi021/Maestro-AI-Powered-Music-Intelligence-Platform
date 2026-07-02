@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS listening_history (
     -- Canonical artist::track dedup key, shared with external_catalog.normalized_key
     -- (see app/core/normalization.py). Populated on fresh installs directly; an
     -- already-running database needs the one-time
-    -- migrations/manual/backfill_listening_history_normalized_key.sql instead,
+    -- migrations/manual_patches/001_expand_catalog.sql instead,
     -- since docker-entrypoint-initdb.d scripts only run against an empty volume.
     normalized_key VARCHAR NOT NULL,
     imported_at TIMESTAMP NOT NULL DEFAULT NOW(),

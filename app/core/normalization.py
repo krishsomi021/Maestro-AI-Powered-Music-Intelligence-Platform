@@ -15,7 +15,7 @@ def normalize_key(artist_name: str, track_name: str) -> str:
     in discovery-mode recommendations agree on identity.
 
     Must stay equivalent to the raw-SQL backfill expression in
-    migrations/manual/backfill_listening_history_normalized_key.sql —
+    migrations/manual_patches/001_expand_catalog.sql —
     see tests/test_normalization.py, which asserts this against the
     live SQL expression rather than just documenting the invariant.
     """

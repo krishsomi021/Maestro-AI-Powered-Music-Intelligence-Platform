@@ -178,7 +178,24 @@ Six services start: `postgres`, `redis`, `fastapi`, `worker`, `beat`, `flower`. 
 
 > Schema changes require a volume wipe: `docker compose down -v && docker compose up --build`
 
-### 4. Provision the agent read-only role
+### 4. Apply manual schema patches (existing databases only)
+
+`init.sql` and `002_agent_schema.sql` are mounted as `docker-entrypoint-initdb.d`
+scripts — Postgres only runs those **once, against an empty data volume**. If
+you add to `init.sql` after a volume already has data (the normal case for an
+existing dev database you don't want to wipe), that change silently never
+applies to it. `migrations/manual_patches/` holds numbered, idempotent, one-time
+scripts for exactly this situation — apply any you haven't already run:
+
+```bash
+docker compose exec -T postgres psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} \
+  -f migrations/manual_patches/001_expand_catalog.sql
+```
+
+Not needed after a fresh `docker compose down -v && docker compose up --build`,
+since `init.sql` already contains the same schema for new volumes.
+
+### 5. Provision the agent read-only role
 
 Required for the `run_sql_query` tool. Re-run after any `docker compose down -v`:
 
@@ -186,7 +203,7 @@ Required for the `run_sql_query` tool. Re-run after any `docker compose down -v`
 docker compose exec fastapi python scripts/provision_agent_role.py
 ```
 
-### 5. Frontend
+### 6. Frontend
 
 ```bash
 cd frontend && npm install && npm run dev   # http://localhost:5173
@@ -310,9 +327,12 @@ docker compose exec fastapi python -m eval.runner --category sql --model claude-
 │           └── useAgentStream.ts   # fetch() + ReadableStream (not EventSource)
 │
 ├── migrations/
-│   ├── init.sql                    # Base schema: jobs, listening_history, track_metadata
-│   └── 002_agent_schema.sql        # Agent tables: agent_sessions, agent_messages,
-│                                   # agent_tool_calls, eval_runs
+│   ├── init.sql                    # Base schema: jobs, listening_history, track_metadata,
+│   │                               # external_catalog — fresh-volume/CI path only
+│   ├── 002_agent_schema.sql        # Agent tables: agent_sessions, agent_messages,
+│   │                               # agent_tool_calls, eval_runs
+│   └── manual_patches/             # One-time idempotent scripts for databases whose
+│                                   # volume predates a given init.sql change (see Setup §4)
 │
 ├── scripts/
 │   └── provision_agent_role.py     # Idempotent: CREATE agent_readonly + SELECT grants

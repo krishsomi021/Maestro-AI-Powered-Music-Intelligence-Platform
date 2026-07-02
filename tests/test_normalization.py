@@ -1,6 +1,6 @@
 """
 Verifies app.core.normalization.normalize_key() stays byte-for-byte equivalent to
-the raw regexp_replace SQL expression used in migrations/manual/backfill_listening_history_normalized_key.sql
+the raw regexp_replace SQL expression used in migrations/manual_patches/001_expand_catalog.sql
 and migrations/init.sql's fresh-install path. If someone changes one without the
 other, this test fails instead of relying on a comment.
 """
