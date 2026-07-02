@@ -17,6 +17,7 @@ celery_app = Celery(
         "worker.tasks.etl_pipeline",
         "worker.tasks.report_generation",
         "worker.tasks.scheduled",
+        "worker.tasks.expand_catalog",
     ],
 )
 

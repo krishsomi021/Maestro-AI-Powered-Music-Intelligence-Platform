@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.core.normalization import normalize_key
 from worker.celery_app import celery_app
 from worker.clients.spotify import get_spotify_client
 from worker.db.sync_session import get_sync_db
@@ -74,6 +75,7 @@ def _transform(entries: list[dict]) -> tuple[list[dict], dict]:
             "track_name": track_name,
             "end_time": end_time,
             "ms_played": int(ms_played),
+            "normalized_key": normalize_key(artist_name, track_name),
         })
 
     stats = {"skipped_short_plays": skipped_short_plays, "skipped_invalid": skipped_invalid}
@@ -82,6 +84,13 @@ def _transform(entries: list[dict]) -> tuple[list[dict], dict]:
 
 def _load(db: Session, rows: list[dict], batch_size: int = LOAD_BATCH_SIZE) -> dict:
     from app.models.listening_history import ListeningHistory
+
+    # _transform() already sets this; defensive fallback for any other caller
+    # passing hand-built rows (e.g. tests exercising _load() in isolation).
+    # This is a Core-level bulk insert, which bypasses the ORM before_insert
+    # event on ListeningHistory, so it can't rely on that backstop either.
+    for row in rows:
+        row.setdefault("normalized_key", normalize_key(row["artist_name"], row["track_name"]))
 
     new_records = 0
     duplicates = 0

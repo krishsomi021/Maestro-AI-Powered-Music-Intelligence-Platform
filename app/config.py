@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
 
+    lastfm_api_key: str = ""
+
     # LLM / Agent
     anthropic_api_key: str = ""
     llm_provider: str = "anthropic"

@@ -39,12 +39,18 @@ if TYPE_CHECKING:
     from app.config import Settings
 
 
+DISCOVERY_CENTROID_TRACK_LIMIT = 50
+
+
 class GetRecommendationsTool(BaseTool):
     name = "get_recommendations"
     description = (
         "Recommend tracks similar to one or more seed tracks using pgvector cosine "
         "similarity over 384-dim embeddings. Provide track names (case-insensitive). "
-        "Returns ranked recommendations excluding the seed tracks."
+        "Returns ranked recommendations excluding the seed tracks. Set discovery_mode "
+        "to search a broader external catalog (via Last.fm) of tracks the user has "
+        "never heard, ranked against their taste-profile centroid, instead of the "
+        "closed set of already-known tracks."
     )
 
     def __init__(self, db: AsyncSession, settings: "Settings") -> None:
@@ -66,21 +72,34 @@ class GetRecommendationsTool(BaseTool):
                     "description": "Number of recommendations to return (default 10).",
                     "default": 10,
                 },
+                "discovery_mode": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, ignore seed_track_names and instead rank the "
+                        "external_catalog (tracks the user has never heard) against "
+                        "their overall taste-profile centroid. Default false."
+                    ),
+                    "default": False,
+                },
             },
-            "required": ["seed_track_names"],
+            "required": [],
         }
 
     async def execute(
         self,
         seed_track_names: list[str] | None = None,
         limit: int = 10,
+        discovery_mode: bool = False,
         **_: Any,
     ) -> ToolResult:
         try:
+            limit = min(int(limit), self._settings.agent_sql_row_cap)
+
+            if discovery_mode:
+                return await self._execute_discovery(limit)
+
             if not seed_track_names:
                 return ToolResult(success=False, error="None of the seed tracks were found")
-
-            limit = min(int(limit), self._settings.agent_sql_row_cap)
 
             # Fetch embeddings for each seed name (ILIKE for case tolerance, LIMIT 1 each).
             embeddings: list[list[float]] = []
@@ -138,3 +157,67 @@ class GetRecommendationsTool(BaseTool):
             )
         except Exception as exc:
             return ToolResult(success=False, error=str(exc))
+
+    async def _execute_discovery(self, limit: int) -> ToolResult:
+        """
+        Open-world discovery: rank external_catalog against a taste-profile centroid
+        built from the user's top DISCOVERY_CENTROID_TRACK_LIMIT most-played tracks
+        (by play count in listening_history), L2-normalized. Biasing toward the
+        user's dominant genres is intended taste-based behavior, not a bug — a
+        single centroid is a deliberate simplification; multi-cluster profiles are
+        a future enhancement.
+
+        The listening_history exclusion is a plain indexed anti-join on
+        normalized_key (populated at write time on both sides), not a per-row
+        function call — see app/core/normalization.py.
+        """
+        top_rows = await self._db.execute(
+            text("""
+                SELECT tm.embedding
+                FROM track_metadata tm
+                JOIN listening_history lh
+                    ON lh.artist_name = tm.artist_name AND lh.track_name = tm.track_name
+                WHERE tm.embedding IS NOT NULL
+                GROUP BY tm.artist_name, tm.track_name, tm.embedding
+                ORDER BY COUNT(*) DESC
+                LIMIT :centroid_limit
+            """),
+            {"centroid_limit": DISCOVERY_CENTROID_TRACK_LIMIT},
+        )
+        top_embeddings = [_parse_embedding(row.embedding) for row in top_rows.all()]
+        if not top_embeddings:
+            return ToolResult(success=False, error="No listening history available to build a taste profile")
+
+        centroid = np.mean(
+            [np.array(e, dtype=np.float32) for e in top_embeddings], axis=0
+        )
+        norm = np.linalg.norm(centroid)
+        if norm > 0:
+            centroid = centroid / norm
+
+        result = await self._db.execute(
+            text("""
+                SELECT ec.artist_name, ec.track_name, ec.lastfm_match_score,
+                       1 - (ec.embedding <=> CAST(:centroid AS vector)) AS score
+                FROM external_catalog ec
+                LEFT JOIN listening_history lh ON lh.normalized_key = ec.normalized_key
+                WHERE ec.embedding IS NOT NULL
+                  AND lh.normalized_key IS NULL
+                ORDER BY ec.embedding <=> CAST(:centroid AS vector)
+                LIMIT :limit
+            """),
+            {"centroid": str(centroid.tolist()), "limit": limit},
+        )
+        recommendations = [
+            {
+                "artist_name": row.artist_name,
+                "track_name": row.track_name,
+                "similarity_score": float(row.score),
+                "lastfm_match_score": row.lastfm_match_score,
+            }
+            for row in result.all()
+        ]
+        return ToolResult(
+            success=True,
+            data={"recommendations": recommendations},
+        )

@@ -41,6 +41,37 @@ CREATE TABLE IF NOT EXISTS listening_history (
     track_name VARCHAR NOT NULL,
     end_time TIMESTAMP NOT NULL,
     ms_played INTEGER NOT NULL,
+    -- Canonical artist::track dedup key, shared with external_catalog.normalized_key
+    -- (see app/core/normalization.py). Populated on fresh installs directly; an
+    -- already-running database needs the one-time
+    -- migrations/manual/backfill_listening_history_normalized_key.sql instead,
+    -- since docker-entrypoint-initdb.d scripts only run against an empty volume.
+    normalized_key VARCHAR NOT NULL,
     imported_at TIMESTAMP NOT NULL DEFAULT NOW(),
     UNIQUE(artist_name, track_name, end_time)
 );
+
+CREATE INDEX IF NOT EXISTS idx_listening_history_normalized_key
+    ON listening_history (normalized_key);
+
+CREATE TABLE IF NOT EXISTS external_catalog (
+    id                  UUID        DEFAULT gen_random_uuid() PRIMARY KEY,
+    artist_name         VARCHAR     NOT NULL,
+    track_name          VARCHAR     NOT NULL,
+    normalized_key      VARCHAR     NOT NULL UNIQUE,
+    lastfm_url          VARCHAR,
+    lastfm_match_score  FLOAT,
+    seed_track_name     VARCHAR,
+    global_play_count   INTEGER,
+    tags                TEXT[],
+    embedding           vector(384),
+    first_seen_at       TIMESTAMP   NOT NULL DEFAULT clock_timestamp(),
+    last_refreshed_at   TIMESTAMP   NOT NULL DEFAULT clock_timestamp()
+);
+
+-- HNSW over ivfflat: ivfflat needs existing data to train its cluster centroids,
+-- but this table starts empty and grows via periodic expand_catalog runs. HNSW
+-- builds incrementally with no training step; the tradeoff (slower inserts) is
+-- fine since writes only happen in the offline Celery task, never the query path.
+CREATE INDEX IF NOT EXISTS idx_external_catalog_embedding_hnsw
+    ON external_catalog USING hnsw (embedding vector_cosine_ops);

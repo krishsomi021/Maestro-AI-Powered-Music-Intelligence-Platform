@@ -55,6 +55,7 @@ def _enqueue_task(job_type: JobType, job_id: str) -> None:
         JobType.ML_INFERENCE: "worker.tasks.ml_inference.run_ml_inference",
         JobType.ETL_PIPELINE: "worker.tasks.etl_pipeline.run_etl_pipeline",
         JobType.REPORT_GENERATION: "worker.tasks.report_generation.run_report_generation",
+        JobType.EXPAND_CATALOG: "worker.tasks.expand_catalog.expand_catalog",
     }
     # task_id=job_id enables celery.control.revoke(job_id) without an extra DB column
     celery_app.send_task(task_map[job_type], args=[job_id], task_id=job_id)
