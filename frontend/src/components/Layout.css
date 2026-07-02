@@ -19,29 +19,6 @@
   font-weight: 700;
 }
 
-.layout__nav {
-  display: flex;
-  gap: var(--space-3);
-}
-
-.layout__nav-link {
-  color: var(--color-text-muted);
-  font-size: 14px;
-  font-weight: 600;
-  text-decoration: none;
-  padding: var(--space-1) 0;
-  border-bottom: 2px solid transparent;
-}
-
-.layout__nav-link:hover {
-  color: var(--color-text);
-}
-
-.layout__nav-link--active {
-  color: var(--color-accent);
-  border-bottom-color: var(--color-accent);
-}
-
 .layout__main {
   flex: 1;
   padding: var(--space-4);
